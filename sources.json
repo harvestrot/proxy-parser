@@ -1,0 +1,44 @@
+{
+  "_help": "Источники прокси. kind: plain (текстовый список ip:port по ссылке) или proxyscrape. type: socks5 / socks4 / http (для plain, если в строках нет схемы). limit: сколько максимум брать за одно обновление. enabled: true/false. После правки просто нажми «Обновить список».",
+  "sources": [
+    {
+      "name": "monosans (GitHub)",
+      "kind": "plain",
+      "type": "socks5",
+      "enabled": true,
+      "_note": "1283 / 48 / 10 / 8 — главный: в нём 8 из 9 быстрых",
+      "url": "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt"
+    },
+    {
+      "name": "proxyscrape.com",
+      "kind": "proxyscrape",
+      "enabled": true,
+      "_note": "657 / 28 / 5 / 4 — без него теряем 4 рабочих и быстрый, которого нет в monosans"
+    },
+    {
+      "name": "proxifly http (GitHub)",
+      "kind": "plain",
+      "type": "http",
+      "enabled": true,
+      "limit": null,
+      "_note": "HTTP: 4368 / 6 / 2 / 2 — быстрые HTTP-прокси, которых нет больше нигде",
+      "url": "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt"
+    },
+    {
+      "name": "openproxylist.xyz",
+      "kind": "plain",
+      "type": "socks5",
+      "enabled": true,
+      "_note": "3000 из 6,8 тыс. / 33 / 6 / 6 — запас, временами даёт уникальные",
+      "url": "https://api.openproxylist.xyz/socks5.txt"
+    },
+    {
+      "name": "ALIILAPRO (GitHub)",
+      "kind": "plain",
+      "type": "socks5",
+      "enabled": true,
+      "_note": "1564 / 16 / 5 / 4 — запас, временами даёт уникальные",
+      "url": "https://raw.githubusercontent.com/ALIILAPRO/Proxy/main/socks5.txt"
+    }
+  ]
+}

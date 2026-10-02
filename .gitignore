@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+*.pyc
+*.tmp
+
+# данные и личные настройки программы
+results/*.json
+routing.json
+settings.json
+vpn/config.json
+vpn/bin/
+vpn/sing-box.log
+
+# sing-box скачивается программой сам (закреплённая версия, проверка SHA-256)
+sing-box-*/
+
+# сборка exe (build.bat): готовый exe — в релизах на GitHub
+build/
+dist/

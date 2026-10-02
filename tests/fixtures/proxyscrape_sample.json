@@ -1,0 +1,7 @@
+{"shown_records": 4, "total_records": 4, "total_countries": 3, "limit": 2000, "skip": 0, "nextpage": false, "proxies": [
+ {"alive": true, "anonymity": "elite", "average_timeout": 2378.7, "ip_data": {"country": "Austria", "countryCode": "AT"}, "port": 1080, "protocol": "socks5", "proxy": "socks5://45.155.71.236:1080", "ssl": true, "timeout": 50.49, "uptime": 80.9, "ip": "45.155.71.236"},
+ {"alive": true, "anonymity": "elite", "average_timeout": 2349.2, "ip_data": {"country": "Spain", "countryCode": "ES"}, "port": 5678, "protocol": "socks4", "proxy": "socks4://83.56.15.57:5678", "ssl": true, "timeout": 816.2, "uptime": 39.2, "ip": "83.56.15.57"},
+ {"alive": true, "anonymity": "elite", "average_timeout": 900.0, "ip_data": {"country": "Russia", "countryCode": "RU"}, "port": 3128, "protocol": "http", "proxy": "http://46.47.197.210:3128", "ssl": true, "timeout": 300.0, "uptime": 95.0, "ip": "46.47.197.210"},
+ {"alive": true, "anonymity": "transparent", "average_timeout": 700.0, "ip_data": {"country": "Russia", "countryCode": "RU"}, "port": 80, "protocol": "http", "proxy": "http://10.0.0.9:80", "ssl": false, "timeout": 200.0, "uptime": 99.0, "ip": "10.0.0.9"},
+ {"alive": false, "anonymity": "elite", "average_timeout": 100.0, "ip_data": {"country": "Germany"}, "port": 1080, "protocol": "socks5", "proxy": "socks5://1.2.3.4:1080", "ssl": true, "timeout": 100.0, "uptime": 10.0, "ip": "1.2.3.4"}
+]}

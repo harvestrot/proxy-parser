@@ -1,0 +1,5 @@
+* text=auto
+# cmd.exe и PowerShell 5.1 надёжнее всего с виндовыми переводами строк
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.ico binary
