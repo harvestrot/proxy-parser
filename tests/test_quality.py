@@ -134,7 +134,73 @@ def trickle_server(chunk: int, pause: float):
     return handler
 
 
+def stalling_server(first: int):
+    """Отдаёт ``first`` байт и «замирает», не закрывая соединение, — так выглядит
+    ограничение ТСПУ для зарубежных хостингов (~16–32 КБ, потом тишина)."""
+    async def handler(reader, writer):
+        while (await reader.readline()) not in (b"\r\n", b""):
+            pass
+        writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 100000000\r\n\r\n" + b"x" * first)
+        await writer.drain()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            pass
+        writer.close()
+    return handler
+
+
+async def test_resolve_cache():
+    """Адрес цели UDP ищется один раз на всех, неудача тоже запоминается."""
+    calls = []
+    real = quality._doh_lookup
+
+    def fake_doh(host, timeout=8.0):
+        calls.append(host)
+        return "203.0.113.7" if host == "stun.ok.test" else None
+
+    quality._doh_lookup = fake_doh
+    try:
+        ips = await asyncio.gather(*(quality._resolve_udp_target(("stun.ok.test", 3478)) for _ in range(20)))
+        assert set(ips) == {"203.0.113.7"} and calls == ["stun.ok.test"], (ips, calls)
+        assert await quality._resolve_udp_target(("stun.bad.invalid", 3478)) is None
+        assert await quality._resolve_udp_target(("stun.bad.invalid", 3478)) is None
+        assert calls.count("stun.bad.invalid") == 1, calls
+    finally:
+        quality._doh_lookup = real
+        for h in ("stun.ok.test", "stun.bad.invalid"):
+            quality._resolved.pop(h, None)
+            quality._failed_at.pop(h, None)
+    print("OK: адрес цели UDP ищется один раз на все проверки; неудача запоминается (без 8 с ожидания у каждой)")
+
+
+async def test_speed_spread_by_subnet():
+    """Замер скорости не должен целиком уйти одной «ферме» с малой задержкой."""
+    farm = [CheckResult(Proxy("45.74.31.%d" % (i % 10), 1000 + i, ProxyType.SOCKS5), True, latency_ms=50 + i)
+            for i in range(30)]
+    others = [CheckResult(Proxy("%d.20.30.40" % (100 + i), 1080, ProxyType.SOCKS5), True, latency_ms=900 + i)
+              for i in range(3)]
+    measured = []
+    real = quality.measure_speed
+
+    async def fake_measure(proxy, **kwargs):
+        measured.append(proxy.host)
+        return 100.0
+
+    quality.measure_speed = fake_measure
+    try:
+        n = await checker.measure_top_speeds(farm + others, top=6)
+    finally:
+        quality.measure_speed = real
+    assert n == 6
+    assert sum(h.startswith("45.74.31.") for h in measured) == checker.SPEED_TEST_PER_SUBNET + 1, measured
+    assert all(r.speed_kbps for r in others), "прокси из других сетей тоже должны получить замер"
+    print("OK: места в замере скорости распределяются по подсетям — ферма не вытесняет остальных")
+
+
 async def main():
+    await test_resolve_cache()
+    await test_speed_spread_by_subnet()
     loop = asyncio.get_running_loop()
     echo_tr, _ = await loop.create_datagram_endpoint(UdpEcho, local_addr=("127.0.0.1", 0))
     echo_port = echo_tr.get_extra_info("sockname")[1]
@@ -205,6 +271,17 @@ async def main():
     assert s is not None and 0 < s < 60, s
     print(f"OK: медленный прокси получает реальную низкую скорость ({s:.0f} КБ/с), а не «неизвестно»")
     slow.close()
+
+    # «замирание» после первых КБ (ТСПУ): замер не ждёт всё окно, скорость — честно низкая
+    stall = await asyncio.start_server(stalling_server(20_000), "127.0.0.1", 0)
+    t_stall = quality.SpeedTarget("127.0.0.1", stall.sockets[0].getsockname()[1], tls=False, path="/")
+    started = asyncio.get_running_loop().time()
+    s = await quality.measure_speed(p_udp, t_stall, timeout=2, max_seconds=6, stall_s=0.5)
+    took = asyncio.get_running_loop().time() - started
+    assert s is not None and 0 < s < quality.SPEED_MIN_BYTES / 1024, s
+    assert took < 3, took
+    print(f"OK: соединение «замерло» после 20 КБ — замер прерван через {took:.1f} с, скорость {s:.0f} КБ/с (медленный)")
+    stall.close()
 
     results = [
         CheckResult(p_udp, True, latency_ms=50),

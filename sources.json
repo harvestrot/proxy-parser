@@ -1,60 +1,28 @@
 {
   "_help": "Источники прокси. kind: plain (текстовый список ip:port по ссылке) или proxyscrape. type: socks5 / socks4 / http (для plain, если в строках нет схемы). limit: сколько максимум брать за одно обновление. enabled: true/false. После правки просто нажми «Обновить список».",
+  "version": 2,
   "sources": [
+    {
+      "name": "proxyscrape.com",
+      "kind": "proxyscrape",
+      "enabled": true,
+      "_note": "SOCKS5: 2974 / 528 лучших по аптайму (все типы) / 53 — 83% SOCKS5 было фермой; если API не открылся — берётся их зеркало на GitHub"
+    },
     {
       "name": "monosans (GitHub)",
       "kind": "plain",
       "type": "socks5",
       "enabled": true,
-      "_note": "1283 / 48 / 10 / 8 — главный: в нём 8 из 9 быстрых",
+      "_note": "677 / 132 / 11 — сдал: 520 адресов — ферма, из остальных больше половины в РФ; оставлен, потому что маленький и перепроверяется каждый час",
       "url": "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt"
     },
     {
-      "name": "proxyscrape.com",
-      "kind": "proxyscrape",
-      "enabled": true,
-      "_note": "657 / 28 / 5 / 4 — без него теряем 4 рабочих и быстрый, которого нет в monosans"
-    },
-    {
-      "name": "proxifly http (GitHub)",
-      "kind": "plain",
-      "type": "http",
-      "enabled": true,
-      "limit": null,
-      "_note": "HTTP: 4368 / 6 / 2 / 2 — быстрые HTTP-прокси, которых нет больше нигде",
-      "url": "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt"
-    },
-    {
-      "name": "openproxylist.xyz",
+      "name": "proxifly socks5 (GitHub)",
       "kind": "plain",
       "type": "socks5",
       "enabled": true,
-      "_note": "3000 из 6,8 тыс. / 33 / 6 / 6 — запас, временами даёт уникальные",
-      "url": "https://api.openproxylist.xyz/socks5.txt"
-    },
-    {
-      "name": "ALIILAPRO (GitHub)",
-      "kind": "plain",
-      "type": "socks5",
-      "enabled": true,
-      "_note": "1564 / 16 / 5 / 4 — запас, временами даёт уникальные",
-      "url": "https://raw.githubusercontent.com/ALIILAPRO/Proxy/main/socks5.txt"
-    },
-    {
-      "name": "elliottophellia (GitHub)",
-      "kind": "plain",
-      "type": "socks5",
-      "enabled": true,
-      "_note": "UDP: 906 / 73 рабочих / 2 с UDP (1 только тут) — маленький и очень «чистый»",
-      "url": "https://raw.githubusercontent.com/elliottophellia/proxylist/master/results/socks5/global/socks5_checked.txt"
-    },
-    {
-      "name": "vmheaven (GitHub)",
-      "kind": "plain",
-      "type": "socks5",
-      "enabled": true,
-      "_note": "UDP: 1041 / 23 рабочих / 2 с UDP",
-      "url": "https://raw.githubusercontent.com/vmheaven/VMHeaven-Free-Proxy-Updated/main/socks5.txt"
+      "_note": "36,9 тыс. / 2714 / 1359 — вернулся: 31 тыс. его адресов были той самой фермой (из-за неё его и вырезали); без неё — самый большой набор разных SOCKS5",
+      "url": "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks5/data.txt"
     },
     {
       "name": "dpangestuw (GitHub)",
@@ -62,8 +30,80 @@
       "type": "socks5",
       "enabled": true,
       "limit": 2500,
-      "_note": "UDP: 4882 / 73 рабочих / 2 с UDP (1 только тут); limit — чтобы не нагружать роутер",
+      "_note": "5165 / 1947 / 797 — второй по числу уникальных SOCKS5; был и ради UDP (звонки)",
       "url": "https://raw.githubusercontent.com/dpangestuw/Free-Proxy/main/socks5_proxies.txt"
+    },
+    {
+      "name": "vmheaven (GitHub)",
+      "kind": "plain",
+      "type": "socks5",
+      "enabled": true,
+      "_note": "1937 / 972 / 245 — половина списка — ферма 69.174.54.x; ради UDP",
+      "url": "https://raw.githubusercontent.com/vmheaven/VMHeaven-Free-Proxy-Updated/main/socks5.txt"
+    },
+    {
+      "name": "ALIILAPRO (GitHub)",
+      "kind": "plain",
+      "type": "socks5",
+      "enabled": true,
+      "_note": "2572 / 457 / 132",
+      "url": "https://raw.githubusercontent.com/ALIILAPRO/Proxy/main/socks5.txt"
+    },
+    {
+      "name": "iplocate (GitHub)",
+      "kind": "plain",
+      "type": "socks5",
+      "enabled": true,
+      "_note": "1306 / 443 / 164 — вернулся: раньше был копией monosans, теперь у него свои; перепроверяется каждые 30 минут",
+      "url": "https://raw.githubusercontent.com/iplocate/free-proxy-list/main/protocols/socks5.txt"
+    },
+    {
+      "name": "elliottophellia (GitHub)",
+      "kind": "plain",
+      "type": "socks5",
+      "enabled": true,
+      "_note": "906 / 146 / 20 — 80% списка — ферма, половина остальных в РФ; ради UDP",
+      "url": "https://raw.githubusercontent.com/elliottophellia/proxylist/master/results/socks5/global/socks5_checked.txt"
+    },
+    {
+      "name": "openproxylist.xyz",
+      "kind": "plain",
+      "type": "socks5",
+      "enabled": true,
+      "_note": "6,8 тыс., берётся 3000 — запас, временами даёт уникальные",
+      "url": "https://api.openproxylist.xyz/socks5.txt"
+    },
+    {
+      "name": "proxifly http (GitHub)",
+      "kind": "plain",
+      "type": "http",
+      "enabled": true,
+      "limit": null,
+      "_note": "4368 / 4031 / 2799 — рабочих в нём мало, но попадаются быстрые, которых нет больше нигде",
+      "url": "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt"
+    },
+    {
+      "name": "hproxy https (GitHub)",
+      "kind": "plain",
+      "type": "http",
+      "enabled": true,
+      "_note": "1745 / 1646 / 1203 — новый: HTTP-прокси, у которых их проверка прошла и по HTTPS; в списке только живые на момент выгрузки (обновляется несколько раз в день)",
+      "url": "https://raw.githubusercontent.com/hproxy-com/free-proxy-list/main/https.txt"
+    },
+    {
+      "name": "maximilianfeix https (GitHub)",
+      "kind": "plain",
+      "enabled": true,
+      "_note": "901 / 370 / 173 — новый: прокси всех типов (тип в строке), прошедшие проверку сертификата TLS, ханипотов и подмены страниц; обновляется каждый час",
+      "url": "https://raw.githubusercontent.com/maximilianfeix/free-proxy-list/main/https.txt"
+    },
+    {
+      "name": "monosans http (GitHub)",
+      "kind": "plain",
+      "type": "http",
+      "enabled": true,
+      "_note": "217 / 198 / 75 — вернулся: маленький, перепроверяется каждый час",
+      "url": "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt"
     }
   ]
 }

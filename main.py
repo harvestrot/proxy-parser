@@ -63,9 +63,11 @@ def cmd_check(args: argparse.Namespace) -> None:
             last["stage"] = name
 
     rep = Reputation.load()
-    results, _stats = asyncio.run(pipeline.run(proxies, rep, concurrency=args.concurrency, timeout=args.timeout, on_stage=on_stage))
+    results, stats = asyncio.run(pipeline.run(proxies, rep, concurrency=args.concurrency, timeout=args.timeout, on_stage=on_stage))
     rep.save()
     storage.save_results(results)
+    if stats.skipped_farms:
+        log.info("Не проверялись лишние порты «ферм»: %d", stats.skipped_farms)
 
     working = [r for r in results if r.working]
     excluded = sum(1 for r in results if r.error == filters.EXCLUDE_REASON)

@@ -2,6 +2,7 @@
 
     источники + проверенные из репутации
       -> чёрный список и «отдых» из репутации (не проверяем)
+      -> лишние порты/адреса «ферм» (не больше 2 с IP и 6 с подсети /24)
       -> страна из источника / кеша; прокси из РФ отсеиваются
       -> быстрый отсев: открыт ли порт (за секунды убирает 80–90%)
       -> полная проверка: HTTPS через прокси + сертификаты + UDP
@@ -16,7 +17,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
-from . import checker, filters, geo
+from . import checker, filters, geo, scraper
 from .models import CheckResult, Proxy
 from .reputation import Reputation
 
@@ -31,6 +32,7 @@ class PipelineStats:
     from_sources: int = 0
     from_reputation: int = 0
     skipped_by_reputation: int = 0
+    skipped_farms: int = 0       # лишние адреса «ферм» (много портов/IP одной подсети)
     excluded_country: int = 0
     prefilter_dead: int = 0
     full_checked: int = 0
@@ -86,6 +88,13 @@ async def run(
             stats.skipped_by_reputation += 1
         else:
             to_check.append(p)
+
+    # 2а. фермы: источники уже урезаны каждый по отдельности, но вместе они
+    #     дают ферму по нескольку раз. Работавшие раньше остаются всегда.
+    worked = {(p.host, p.port) for p in to_check if (e := rep.get(p)) is not None and e.ok > 0}
+    capped = scraper.limit_farms(to_check, keep=worked)
+    stats.skipped_farms = len(to_check) - len(capped)
+    to_check = capped
 
     # 3. страны, известные заранее (источник или кеш), и исключение РФ
     _apply_known_countries(to_check, rep)

@@ -206,8 +206,9 @@ class AppController:
 
             log.info(
                 "Кандидатов: %d из источников + %d проверенных ранее; пропущено по репутации: %d; "
-                "из РФ: %d; мёртвых по быстрому отсеву: %d; полную проверку прошли %d из %d (с UDP: %d)",
-                ps.from_sources, ps.from_reputation, ps.skipped_by_reputation, ps.excluded_country,
+                "лишних портов «ферм»: %d; из РФ: %d; мёртвых по быстрому отсеву: %d; "
+                "полную проверку прошли %d из %d (с UDP: %d)",
+                ps.from_sources, ps.from_reputation, ps.skipped_by_reputation, ps.skipped_farms, ps.excluded_country,
                 ps.prefilter_dead, ps.working, ps.full_checked, ps.udp,
             )
             fast = sorted((r.speed_kbps for r in results if r.working and r.speed_kbps), reverse=True)
