@@ -143,7 +143,7 @@ async def check_all(
     on_progress=None,
     required_probes: tuple[ProbeTarget, ...] = DEFAULT_REQUIRED_PROBES,
     check_udp_support: bool = True,
-    udp_target: tuple[str, int] = quality.UDP_TEST_TARGET,
+    udp_target: tuple[str, int] | None = None,  # None — штатные цели (quality.UDP_TEST_TARGETS)
 ) -> list[CheckResult]:
     """Проверить список прокси параллельно (с ограничением конкурентности).
     У рабочих SOCKS5 заодно проверяется поддержка UDP (нужна для звонков)."""

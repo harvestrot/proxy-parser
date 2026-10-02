@@ -51,6 +51,13 @@ def main():
     assert rep.proven(now + 3000 + rp.PROVEN_MAX_AGE + 10_000) == []
     print("OK: «проверенные» (2+ успеха за 48 ч) перепроверяются, даже если пропали из источников")
 
+    rep_udp = rp.Reputation(path=path.with_name("udp.json"))  # отдельно — не путать счётчики ниже
+    rep_udp.update([CheckResult(P("1.0.0.77"), True, latency_ms=300, udp_ms=120)], now)  # один успех, с UDP
+    rep_udp.update([CheckResult(P("1.0.0.78"), True, latency_ms=300)], now)               # один успех, без UDP
+    assert {p.address for p in rep_udp.proven(now + 5 * 24 * 3600)} == {"1.0.0.77:1080"}
+    assert rep_udp.proven(now + rp.UDP_PROVEN_MAX_AGE + 1) == []
+    print("OK: прокси с UDP (редкость) — «проверенный» после одной проверки и помнится неделю")
+
     r = CheckResult(good, True)
     rep.annotate(r)
     assert (r.rep_ok, r.rep_checks) == (4, 4)

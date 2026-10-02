@@ -56,6 +56,17 @@ DEFAULT_CONFIG = {
         {"name": "ALIILAPRO (GitHub)", "kind": "plain", "type": "socks5", "enabled": True,
          "_note": "1564 / 16 / 5 / 4 — запас, временами даёт уникальные",
          "url": "https://raw.githubusercontent.com/ALIILAPRO/Proxy/main/socks5.txt"},
+        # Ради UDP (звонки): сравнение 2 октября 2026 — 34 тыс. SOCKS5 из 27 списков,
+        # рабочих 188, с настоящим UDP всего 4; эти три источника вместе дают их все.
+        {"name": "elliottophellia (GitHub)", "kind": "plain", "type": "socks5", "enabled": True,
+         "_note": "UDP: 906 / 73 рабочих / 2 с UDP (1 только тут) — маленький и очень «чистый»",
+         "url": "https://raw.githubusercontent.com/elliottophellia/proxylist/master/results/socks5/global/socks5_checked.txt"},
+        {"name": "vmheaven (GitHub)", "kind": "plain", "type": "socks5", "enabled": True,
+         "_note": "UDP: 1041 / 23 рабочих / 2 с UDP",
+         "url": "https://raw.githubusercontent.com/vmheaven/VMHeaven-Free-Proxy-Updated/main/socks5.txt"},
+        {"name": "dpangestuw (GitHub)", "kind": "plain", "type": "socks5", "enabled": True, "limit": 2500,
+         "_note": "UDP: 4882 / 73 рабочих / 2 с UDP (1 только тут); limit — чтобы не нагружать роутер",
+         "url": "https://raw.githubusercontent.com/dpangestuw/Free-Proxy/main/socks5_proxies.txt"},
     ],
     # Вырезаны по замеру 2 октября 2026 (вернуть — дописать запись выше):
     #  * proxifly SOCKS5 — https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks5/data.txt

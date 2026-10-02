@@ -29,7 +29,10 @@ log = logging.getLogger(__name__)
 # STUN-сервер на обычном (не DNS) порту: многие бесплатные прокси пропускают
 # только DNS (порт 53), а обычный UDP режут или теряют — старая проверка одним
 # DNS-запросом к 1.1.1.1:53 таких не ловила.
-UDP_TEST_TARGET = ("stun.cloudflare.com", 3478)
+UDP_TEST_TARGET = ("stun.l.google.com", 19302)
+# Несколько целей: прокси может резать одну — засчитывается любая ответившая.
+UDP_TEST_TARGETS = (UDP_TEST_TARGET, ("stun.cloudflare.com", 3478))
+DOH_URL = "https://1.1.1.1/dns-query"
 UDP_PROBES = 5          # серия пакетов, а не один...
 UDP_MIN_REPLIES = 4     # ...и терять можно не больше одного
 UDP_PROBE_GAP_S = 0.2
@@ -52,22 +55,57 @@ def _stun_request(txid: bytes) -> bytes:
 _resolved: dict[str, str] = {}
 
 
+def _is_real_ip(ip: str) -> bool:
+    """Настоящий публичный IPv4. Отсекает «фиктивные» адреса: роутеры и
+    VPN-клиенты в режиме fake-IP отдают для доменов адреса из 198.18.0.0/15,
+    провайдер может подменить ответ на заглушку в частной сети."""
+    try:
+        return ipaddress.IPv4Address(ip).is_global
+    except ValueError:
+        return False
+
+
+def _doh_lookup(host: str, timeout: float = 8.0) -> str | None:
+    """A-запись через DNS-over-HTTPS прямо у 1.1.1.1 — мимо DNS роутера и
+    провайдера (на практике роутер отдавал для stun.cloudflare.com фиктивный
+    198.18.0.43, и UDP-проверка у всех прокси уходила в пустоту)."""
+    import json
+    import urllib.parse
+    import urllib.request
+
+    url = f"{DOH_URL}?{urllib.parse.urlencode({'name': host, 'type': 'A'})}"
+    req = urllib.request.Request(url, headers={"Accept": "application/dns-json"})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # без системного прокси
+    with opener.open(req, timeout=timeout) as resp:
+        answers = json.load(resp).get("Answer") or []
+    return next((a["data"] for a in answers if a.get("type") == 1 and _is_real_ip(a.get("data", ""))), None)
+
+
 async def _resolve_udp_target(target: tuple[str, int]) -> str | None:
-    """IPv4 цели UDP-проверки (в SOCKS5-заголовке шлём IP); кешируется."""
+    """IPv4 цели UDP-проверки (в SOCKS5-заголовке шлём IP); кешируется.
+    Сначала DoH, потом системный DNS — но только с настоящим публичным адресом."""
     host = target[0]
     if host in _resolved:
         return _resolved[host]
     try:
         socket.inet_aton(host)
-        ip = host
+        ip: str | None = host  # уже IP (в том числе локальный — в тестах)
     except OSError:
         try:
-            infos = await asyncio.get_running_loop().getaddrinfo(host, target[1], family=socket.AF_INET,
-                                                                 type=socket.SOCK_DGRAM)
-        except OSError as exc:
-            log.debug("Не удалось узнать адрес %s: %s", host, exc)
+            ip = await asyncio.to_thread(_doh_lookup, host)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("DoH для %s не удался: %s", host, exc)
+            ip = None
+        if ip is None:
+            try:
+                infos = await asyncio.get_running_loop().getaddrinfo(host, target[1], family=socket.AF_INET,
+                                                                     type=socket.SOCK_DGRAM)
+                ip = next((i[4][0] for i in infos if _is_real_ip(i[4][0])), None)
+            except OSError as exc:
+                log.debug("Не удалось узнать адрес %s: %s", host, exc)
+        if ip is None:
+            log.warning("Не удалось узнать настоящий адрес %s для проверки UDP", host)
             return None
-        ip = infos[0][4][0]
     _resolved[host] = ip
     return ip
 
@@ -210,14 +248,18 @@ def _median(values: list[float]) -> float:
     return s[len(s) // 2]
 
 
-async def check_udp(proxy: Proxy, timeout: float = 5.0, target: tuple[str, int] = UDP_TEST_TARGET) -> float | None:
+async def check_udp(proxy: Proxy, timeout: float = 5.0, target: tuple[str, int] | None = None) -> float | None:
     """Пропускает ли SOCKS5-прокси UDP: серия пакетов, почти все должны
-    вернуться. Вернуть медианную задержку UDP в мс или None."""
-    rtts = await _udp_series(proxy, target, UDP_PROBES, UDP_PROBE_GAP_S, timeout, tail_s=min(timeout, 2.0))
-    ok = [r for r in rtts or () if r is not None]
-    if len(ok) < UDP_MIN_REPLIES:
-        return None  # UDP не идёт или теряется — для игр и звонков не годится
-    return round(_median(ok), 1)
+    вернуться. Цели перебираются по очереди (прокси может резать одну) —
+    засчитывается первая ответившая. Вернуть медианную задержку UDP в мс или None."""
+    if proxy.type != ProxyType.SOCKS5:
+        return None
+    for t in ([target] if target else UDP_TEST_TARGETS):
+        rtts = await _udp_series(proxy, t, UDP_PROBES, UDP_PROBE_GAP_S, timeout, tail_s=min(timeout, 2.0))
+        ok = [r for r in rtts or () if r is not None]
+        if len(ok) >= UDP_MIN_REPLIES:
+            return round(_median(ok), 1)
+    return None  # UDP не идёт или теряется — для звонков не годится
 
 
 # ---------------------------------------------------------------- скорость

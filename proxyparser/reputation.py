@@ -36,6 +36,7 @@ COOLDOWN_AFTER_FAILS = 2          # столько провалов подряд
 COOLDOWN_SECONDS = 24 * 3600
 PROVEN_MIN_OK = 2                 # «проверенный» — прошёл хотя бы 2 проверки...
 PROVEN_MAX_AGE = 48 * 3600        # ...и работал не позже чем 48 ч назад
+UDP_PROVEN_MAX_AGE = 7 * 24 * 3600  # прокси с UDP: одной проверки хватает, помним неделю
 FORGET_AFTER = 7 * 24 * 3600      # не встречался неделю — забываем (кроме чёрного списка)
 FORGET_DEAD_AFTER = 3 * 24 * 3600 # ни разу не работавшие — забываем быстрее
 EMA_ALPHA = 0.4                   # вес последнего замера в сглаженных средних
@@ -157,9 +158,14 @@ class Reputation:
         now = now or time.time()
         out = []
         for e in self.entries.values():
-            if e.mitm or e.ok < PROVEN_MIN_OK or e.last_ok is None:
+            if e.mitm or e.last_ok is None:
                 continue
-            if now - e.last_ok <= PROVEN_MAX_AGE:
+            if e.udp_ok:
+                # прокси с настоящим UDP — редкость (≈2% рабочих SOCKS5): хватает
+                # одной успешной проверки, и помним такой неделю, а не двое суток
+                if now - e.last_ok <= UDP_PROVEN_MAX_AGE:
+                    out.append(e.to_proxy())
+            elif e.ok >= PROVEN_MIN_OK and now - e.last_ok <= PROVEN_MAX_AGE:
                 out.append(e.to_proxy())
         return out
 

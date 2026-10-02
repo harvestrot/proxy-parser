@@ -161,6 +161,19 @@ async def main():
     print("OK: UDP-проверка — серия пакетов; прокси с большими потерями отбракован")
     lossy_srv.close()
 
+    # роутер/VPN-клиент в режиме fake-IP отдаёт для домена фиктивный 198.18.x.x —
+    # такой адрес не годится (пакеты уйдут в пустоту у ВСЕХ прокси)
+    assert not quality._is_real_ip("198.18.0.43") and not quality._is_real_ip("192.168.1.1")
+    assert quality._is_real_ip("162.159.207.0") and quality._is_real_ip("74.125.250.129")
+    # одна цель молчит (прокси её режет) — засчитывается следующая
+    real_targets = quality.UDP_TEST_TARGETS
+    quality.UDP_TEST_TARGETS = (("127.0.0.1", 9), ("127.0.0.1", echo_port))
+    try:
+        assert await quality.check_udp(p_udp, timeout=2) is not None
+    finally:
+        quality.UDP_TEST_TARGETS = real_targets
+    print("OK: фиктивные адреса целей отсекаются; если одна цель молчит — проверяется следующая")
+
     big = await asyncio.start_server(file_server(1_500_000), "127.0.0.1", 0)
     small = await asyncio.start_server(file_server(10_000), "127.0.0.1", 0)
     t_big = quality.SpeedTarget("127.0.0.1", big.sockets[0].getsockname()[1], tls=False, path="/")
