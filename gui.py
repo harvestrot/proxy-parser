@@ -16,7 +16,7 @@ from tkinter import messagebox, ttk
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
-from proxyparser import (__version__, app_routing, app_settings, autostart, single_instance,  # noqa: E402
+from proxyparser import (__version__, app_routing, app_settings, autostart, geo, single_instance,  # noqa: E402
                          singbox_config, singbox_manager, sources_config, theme, tray)
 from proxyparser.controller import AppController  # noqa: E402
 from proxyparser.models import CheckResult  # noqa: E402
@@ -30,6 +30,15 @@ VPN_LABELS = {
     "on": ("VPN подключён", theme.GREEN, "Отключить", "danger"),
 }
 INFO_COLORS = {"ok": theme.GREEN, "wait": theme.AMBER, "warn": theme.RED}
+
+
+def _network_text(p) -> str:
+    """«провайдер · Bredband2 AB» — тип сети и чья она (без номера AS)."""
+    label = geo.NETWORK_LABELS.get(p.network or "")
+    if not label:
+        return "—"
+    owner = p.asn.split(" ", 1)[1] if p.asn and " " in p.asn else ""
+    return f"{label} · {owner}" if owner else label
 
 
 class App:
@@ -173,20 +182,6 @@ class App:
         self._show_routing()
         self._show_prefs()
 
-        # лёгкий режим — без прав администратора, для одного браузера
-        light = ttk.Frame(frame)
-        light.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(16, 0))
-        ttk.Label(light, text="ЛЁГКИЙ РЕЖИМ", style="Caption.TLabel").pack(side="left", padx=(0, 12))
-        ttk.Label(light, text="SOCKS5 для одного браузера, без прав администратора:", style="Muted.TLabel").pack(
-            side="left")
-        ttk.Label(light, text="127.0.0.1 :", style="Muted.TLabel").pack(side="left", padx=(8, 4))
-        self.port_var = tk.StringVar(value="1080")
-        ttk.Entry(light, textvariable=self.port_var, width=6).pack(side="left")
-        self.router_button = ttk.Button(light, text="Запустить", command=self.on_router_click)
-        self.router_button.pack(side="left", padx=(10, 0))
-        self.router_status = ttk.Label(light, text="", style="Ok.TLabel")
-        self.router_status.pack(side="left", padx=10)
-
     def _tile(self, parent, column: int, caption: str, link: str, command):
         """Плитка: подпись, значение, пояснение и кнопка-ссылка."""
         tile = tk.Frame(parent, bg=theme.FIELD, highlightthickness=1, highlightbackground=theme.BORDER)
@@ -229,12 +224,13 @@ class App:
 
         table_frame = tk.Frame(frame, bg=theme.SURFACE, highlightthickness=1, highlightbackground=theme.BORDER)
         table_frame.pack(fill="both", expand=True)
-        columns = ("type", "address", "country", "latency", "speed", "udp", "rel", "source")
+        columns = ("type", "address", "country", "network", "latency", "speed", "udp", "rel", "source")
         self.table = ttk.Treeview(table_frame, columns=columns, show="headings", height=10)
         for col, title, width, anchor in (
             ("type", "ТИП", 80, "center"),
-            ("address", "АДРЕС", 210, "w"),
-            ("country", "СТРАНА", 140, "w"),
+            ("address", "АДРЕС", 190, "w"),
+            ("country", "СТРАНА", 120, "w"),
+            ("network", "СЕТЬ", 150, "w"),  # провайдер / хостинг (geo.py) и чья сеть
             ("latency", "ОТКЛИК, МС", 95, "e"),
             ("speed", "СКОРОСТЬ, КБ/С", 115, "e"),
             ("udp", "UDP", 60, "center"),
@@ -337,7 +333,7 @@ class App:
             self.unpin_button.state(["disabled"])
             self.unpin_button.configure(text="Ничего не закреплено")
         self.countries_label.configure(text=", ".join(s.countries) if s.countries else "Любые")
-        self.countries_sub.configure(text="Только из них — в VPN и лёгкий режим" if s.countries
+        self.countries_sub.configure(text="Только из них — в VPN" if s.countries
                                      else "Прокси из всех стран, кроме России")
 
     def _pin(self, address: str | None) -> None:
@@ -406,17 +402,6 @@ class App:
             return
         self.ctl.connect_vpn()
 
-    def on_router_click(self) -> None:
-        if self.ctl.router_running:
-            self.ctl.stop_router()
-            return
-        try:
-            port = int(self.port_var.get())
-        except ValueError:
-            messagebox.showerror(APP_TITLE, "Порт должен быть числом")
-            return
-        self.ctl.start_router(port)
-
     def on_row_double_click(self, _event: tk.Event | None) -> None:
         sel = self.table.selection()
         if not sel:
@@ -484,12 +469,6 @@ class App:
                 self.progress.stop()
                 self.progress.configure(mode="determinate", value=0)
                 self.progress.pack_forget()
-        elif kind == "router":
-            running = event[1]
-            self.router_button.configure(text="Остановить" if running else "Запустить")
-            self.router_status.configure(
-                text="● работает — пропиши SOCKS5 127.0.0.1:%s в браузере" % self.port_var.get() if running else ""
-            )
         elif kind == "vpn":
             self._apply_vpn_state(event[1])
         elif kind == "vpn_info":
@@ -577,7 +556,8 @@ class App:
             row += 1
             self.table.insert("", "end", iid=p.address, tags=tags,
                               values=(p.type.value, ("★ " if p.address == pinned else "") + p.address,
-                                      p.country or "—", latency, speed, udp, rel, p.source or "—"))
+                                      p.country or "—", _network_text(p), latency, speed, udp, rel,
+                                      p.source or "—"))
         total = sum(counts.values())
         self.counts_var.set(
             f"{total} рабочих  ·  SOCKS5 {counts['SOCKS5']}  ·  SOCKS4 {counts['SOCKS4']}  ·  "
@@ -897,7 +877,7 @@ class SettingsDialog:
 
 
 class CountriesDialog:
-    """Окно «Страны»: из каких стран брать прокси (для VPN и лёгкого режима)."""
+    """Окно «Страны»: из каких стран брать прокси для VPN."""
 
     def __init__(self, parent: tk.Tk, results: list[CheckResult], selected: list[str], on_done) -> None:
         self.on_done = on_done
@@ -918,7 +898,7 @@ class CountriesDialog:
         frm.pack(fill="both", expand=True)
         ttk.Label(frm, text="Страны прокси", style="CardTitle.TLabel").pack(anchor="w", pady=(0, 8))
         ttk.Label(frm, wraplength=510, style="Muted.TLabel",
-                  text="Отметь страны — в VPN и лёгкий режим пойдут прокси только из них. Ничего не отмечено — "
+                  text="Отметь страны — в VPN пойдут прокси только из них. Ничего не отмечено — "
                        "любые. Закреплённый прокси работает в любом случае. Если в выбранных странах рабочих "
                        "не окажется, программа возьмёт любые и предупредит в журнале.").pack(anchor="w")
 

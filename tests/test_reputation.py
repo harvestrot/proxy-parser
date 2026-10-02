@@ -48,29 +48,41 @@ def main():
 
     proven = {p.address for p in rep.proven(now + 3000)}
     assert proven == {"1.0.0.1:1080", "1.0.0.2:1080"}, proven
-    assert rep.proven(now + 3000 + rp.PROVEN_MAX_AGE + 10_000) == []
+    # через 48 ч «мигающий» уже не проверенный, а быстрый (1000 КБ/с) помнится неделю — см. ниже
+    assert {p.address for p in rep.proven(now + 3000 + rp.PROVEN_MAX_AGE + 10_000)} == {"1.0.0.1:1080"}
     print("OK: «проверенные» (2+ успеха за 48 ч) перепроверяются, даже если пропали из источников")
 
     rep_udp = rp.Reputation(path=path.with_name("udp.json"))  # отдельно — не путать счётчики ниже
     rep_udp.update([CheckResult(P("1.0.0.77"), True, latency_ms=300, udp_ms=120)], now)  # один успех, с UDP
     rep_udp.update([CheckResult(P("1.0.0.78"), True, latency_ms=300)], now)               # один успех, без UDP
     assert {p.address for p in rep_udp.proven(now + 5 * 24 * 3600)} == {"1.0.0.77:1080"}
-    assert rep_udp.proven(now + rp.UDP_PROVEN_MAX_AGE + 1) == []
+    assert rep_udp.proven(now + rp.RARE_PROVEN_MAX_AGE + 1) == []
     print("OK: прокси с UDP (редкость) — «проверенный» после одной проверки и помнится неделю")
+
+    rep_fast = rp.Reputation(path=path.with_name("fast.json"))
+    rep_fast.update([CheckResult(P("1.0.0.80"), True, latency_ms=130, speed_kbps=5600)], now)  # один успех, быстрый
+    rep_fast.update([CheckResult(P("1.0.0.81"), True, latency_ms=130, speed_kbps=200)], now)   # один успех, медленный
+    assert {p.address for p in rep_fast.proven(now + 5 * 24 * 3600)} == {"1.0.0.80:1080"}
+    assert rep_fast.proven(now + rp.RARE_PROVEN_MAX_AGE + 1) == []
+    print("OK: быстрый прокси (от 500 КБ/с) — «проверенный» после одной проверки и помнится неделю, "
+          "даже если пропал из списков")
 
     r = CheckResult(good, True)
     rep.annotate(r)
     assert (r.rep_ok, r.rep_checks) == (4, 4)
     rep.remember_countries({"1.0.0.1": ("DE", "Germany")})
+    rep.remember_networks({"1.0.0.1": ("isp", "AS29518 Bredband2 AB"), "1.0.0.2": (None, "")})
     rep.save()
     rep2 = rp.Reputation.load(path)
     assert rep2.get(good).ok == 4 and rep2.get(mitm).mitm and rep2.country_of("1.0.0.1") == ("DE", "Germany")
+    assert rep2.network_of("1.0.0.1") == ("isp", "AS29518 Bredband2 AB")
+    assert rep2.network_of("1.0.0.2") is None  # неизвестный тип сети не кешируется — спросим ещё раз
     e_dead = rep2.get(fresh)
     assert e_dead is not None and e_dead.fail_streak == 2 and e_dead.skip_until > now
     import json as _json
     raw = _json.loads(path.read_text(encoding="utf-8"))
     assert "1.0.0.9:1080" in "".join(raw["dead"]) and all("1.0.0.9" not in k for k in raw["entries"])
-    print("OK: сохранение/загрузка, кеш стран; мёртвые хранятся компактно и восстанавливаются")
+    print("OK: сохранение/загрузка, кеш стран и типов сети; мёртвые хранятся компактно и восстанавливаются")
 
     early = rep2.prune(now + rp.FORGET_DEAD_AFTER + 10_000)
     assert rep2.get(dead) is None and rep2.get(fresh) is None and rep2.get(good) is not None

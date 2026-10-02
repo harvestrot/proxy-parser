@@ -114,7 +114,11 @@ DEFAULT_CONFIG = {
     #    встречается ни в одном проверяемом списке): ebrasha/abdal-proxy-hub,
     #    ErcinDedeoglu, SoliSpirit, TuanMinPay, shubhamshendre;
     #  * раньше: 0 рабочих — MuRongPIG, zevtyardt, fyvri, Tsprnay, r00tee,
-    #    jetkai, vakhov, roosterkid; SOCKS4-списки — 0 быстрых.
+    #    jetkai, vakhov, roosterkid; SOCKS4-списки — 0 быстрых;
+    #  * GeoNode API (proxylist.geonode.com) — проверен 2 октября 2026: ~3,8
+    #    тыс. свежих, 2335 из них нет в списках выше, но из этих 2335 рабочих
+    #    оказалось 5, быстрый — 1 (Индонезия, отклик 1,9 с), в ближней Европе —
+    #    ни одного. Лишние 2,3 тыс. проверок на каждое обновление не окупаются.
 }
 
 # Источники по умолчанию прошлых версий: (kind, url, type, enabled, limit).

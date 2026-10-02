@@ -14,7 +14,7 @@ import tempfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from proxyparser import checker, pipeline, quality  # noqa: E402
+from proxyparser import checker, geo, pipeline, quality  # noqa: E402
 from proxyparser.models import CheckResult, Proxy, ProxyType  # noqa: E402
 from proxyparser.reputation import Reputation  # noqa: E402
 
@@ -97,7 +97,10 @@ async def main():
 
     def fake_lookup(ips):
         geo_calls.append(list(ips))
-        return {"127.0.0.2": ("RU", "Russia")}
+        known = {"127.0.0.2": geo.IpInfo("RU", "Russia", geo.NET_ISP, "AS1 Ru"),
+                 "127.0.0.1": geo.IpInfo("DE", "Germany", geo.NET_ISP, "AS29518 Bredband2 AB"),
+                 "127.0.0.5": geo.IpInfo("DE", "Germany", geo.NET_HOSTING, "AS24940 Hetzner Online GmbH")}
+        return {ip: known[ip] for ip in ips if ip in known}
 
     stages = []
     results, st = await pipeline.run(
@@ -105,7 +108,7 @@ async def main():
         rep,
         timeout=2,
         on_stage=lambda name, d, t: stages.append(name),
-        lookup_countries=fake_lookup,
+        lookup_ips=fake_lookup,
         check_kwargs={"probes": (checker.ProbeTarget("127.0.0.1", t_port, False),), "required_probes": (),
                       "udp_target": ("127.0.0.1", 9)},
         speed_kwargs={"target": quality.SpeedTarget("127.0.0.1", t_port, tls=False, path="/big")},
@@ -120,8 +123,9 @@ async def main():
     assert st.excluded_country == 2, st
     assert by[(ru_known.host, ru_known.port)].error == "прокси в России — исключён"
     assert by[(no_country.host, no_country.port)].error == "прокси в России — исключён"
-    assert geo_calls == [["127.0.0.2"]], geo_calls  # страна 127.0.0.5 была в кеше — не спрашиваем
-    print("OK: РФ отсеяна и по данным источника, и по гео-поиску; кеш стран экономит запросы")
+    # спрашиваем только рабочих: у 127.0.0.2 нет страны, у остальных — типа сети
+    assert len(geo_calls) == 1 and sorted(geo_calls[0]) == ["127.0.0.1", "127.0.0.2", "127.0.0.5"], geo_calls
+    print("OK: РФ отсеяна и по данным источника, и по гео-поиску")
 
     assert st.prefilter_dead == 1 and by[(dead.host, dead.port)].error == checker.PREFILTER_DEAD_REASON
     print("OK: мёртвый порт отсеян быстрым отсевом, до полной проверки не дошёл")
@@ -135,11 +139,27 @@ async def main():
     assert stages[0] == "Быстрый отсев мёртвых" and stages.index("Проверка прокси") < stages.index("Определяю страны") < stages.index("Замер скорости")
     print("OK: этапы для прогресса:", " → ".join(dict.fromkeys(stages)))
 
+    assert (g.proxy.network, g.proxy.asn) == (geo.NET_ISP, "AS29518 Bredband2 AB")
+    assert pr.proxy.network == geo.NET_HOSTING and pr.proxy.country == "Germany"
+    assert rep.network_of("127.0.0.1") == (geo.NET_ISP, "AS29518 Bredband2 AB")
+    geo_calls.clear()
+    good2 = Proxy("127.0.0.1", ports[0], ProxyType.SOCKS5, country_code="DE", source="src")
+    results, _ = await pipeline.run(
+        [good2], rep, timeout=2, lookup_ips=fake_lookup,
+        check_kwargs={"probes": (checker.ProbeTarget("127.0.0.1", t_port, False),), "required_probes": (),
+                      "udp_target": ("127.0.0.1", 9)},
+        speed_kwargs={"target": quality.SpeedTarget("127.0.0.1", t_port, tls=False, path="/big")},
+        prefilter_kwargs={"timeout": 1})
+    again = next(r for r in results if r.proxy.port == ports[0] and r.proxy.host == "127.0.0.1")
+    assert again.working and again.proxy.network == geo.NET_ISP
+    assert geo_calls == [], geo_calls
+    print("OK: тип сети (провайдер / хостинг) определяется у рабочих и берётся из кеша без повторного запроса")
+
     # «нет интернета»: ни один порт не открылся -> ошибка, репутация не портится
     rep2 = Reputation.load(pathlib.Path(tempfile.mkdtemp()) / "rep.json")
     try:
         await pipeline.run([Proxy("127.0.0.1", free_port(), ProxyType.SOCKS5, country_code="DE")], rep2,
-                           lookup_countries=fake_lookup, prefilter_kwargs={"timeout": 0.5})
+                           lookup_ips=fake_lookup, prefilter_kwargs={"timeout": 0.5})
         raise AssertionError("ожидали ошибку")
     except RuntimeError as exc:
         assert "интернет" in str(exc)
@@ -153,7 +173,7 @@ async def main():
     old_good = Proxy("127.0.0.6", ports[1], ProxyType.SOCKS5, country_code="DE")
     rep3.update([CheckResult(old_good, True, latency_ms=10)])
     results, st = await pipeline.run(
-        [farm_good] + farm_dead + [old_good], rep3, timeout=2, lookup_countries=fake_lookup,
+        [farm_good] + farm_dead + [old_good], rep3, timeout=2, lookup_ips=fake_lookup,
         check_kwargs={"probes": (checker.ProbeTarget("127.0.0.1", t_port, False),), "required_probes": (),
                       "udp_target": ("127.0.0.1", 9)},
         speed_kwargs={"target": quality.SpeedTarget("127.0.0.1", t_port, tls=False, path="/big")},

@@ -118,6 +118,8 @@ def load_working_proxies(path: pathlib.Path | None = None) -> list[CheckResult]:
             source_latency_ms=item.get("source_latency_ms"),
             source=item.get("source"),
             country_code=item.get("country_code"),
+            network=item.get("network"),
+            asn=item.get("asn"),
         )
         if is_excluded(proxy):
             continue  # например, сохранено до появления фильтра по странам

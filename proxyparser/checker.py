@@ -13,7 +13,10 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import ipaddress
 import logging
+import socket
 import ssl
 import time
 from dataclasses import dataclass
@@ -33,6 +36,7 @@ class ProbeTarget:
     port: int
     tls: bool
     path: str = "/generate_204"
+    connect_host: str | None = None  # куда просить прокси подключиться (IP); None — к host по имени
 
 
 DEFAULT_PROBES: tuple[ProbeTarget, ...] = (
@@ -66,7 +70,7 @@ _PROBE_ERRORS = (OSError, asyncio.TimeoutError, asyncio.IncompleteReadError, ssl
 
 
 async def _probe(proxy: Proxy, target: ProbeTarget, timeout: float) -> None:
-    reader, writer = await connect_via(proxy, target.host, target.port, timeout)
+    reader, writer = await connect_via(proxy, target.connect_host or target.host, target.port, timeout)
     try:
         if target.tls:
             if not hasattr(writer, "start_tls"):  # Python < 3.11
@@ -114,13 +118,49 @@ async def _check_as(
     return CheckResult(proxy=proxy, working=False, error=last_error, checked_at=time.time()), reachable
 
 
+def _is_ip(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False
+
+
+# Проба «как в VPN». sing-box просит прокси подключиться не к имени сайта, а к
+# IP, который сам узнал через DNS. Встречаются прокси, которые по имени
+# пропускают честно, а по IP подменяют сертификат почти на всех сайтах:
+# 2 октября 2026 так попался 34.88.38.81:9443 — открытый наружу корпоративный
+# шлюз FortiGate с расшифровкой HTTPS (сертификат «Fortinet»). Проверку по
+# имени он проходил, был самым быстрым и попадал в VPN, а браузер на части
+# сайтов показывал «Подключение не защищено». Поэтому первая TLS-проба
+# повторяется по IP (vpn_like_probes): поддельный сертификат там — в чёрный
+# список, а прочие сбои по этому IP прокси не бракуют (главное — нет подмены).
+async def vpn_like_probes(probes: tuple[ProbeTarget, ...]) -> tuple[ProbeTarget, ...]:
+    """Первая TLS-проба с именем сайта — ещё раз, но с подключением по IP,
+    как это делает VPN. IP узнаётся один раз на всю проверку; не узнался —
+    проба пропускается."""
+    tls = next((t for t in probes if t.tls and not _is_ip(t.host)), None)
+    if tls is None:
+        return ()
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(
+            tls.host, tls.port, family=socket.AF_INET, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        log.info("Не удалось узнать IP %s (%s) — проверка подмены сертификата по IP пропущена", tls.host, exc)
+        return ()
+    return (dataclasses.replace(tls, connect_host=infos[0][4][0]),)
+
+
 async def check_proxy(
     proxy: Proxy,
     *,
     probes: tuple[ProbeTarget, ...] = DEFAULT_PROBES,
     required_probes: tuple[ProbeTarget, ...] = DEFAULT_REQUIRED_PROBES,
+    ip_probes: tuple[ProbeTarget, ...] = (),
     timeout: float = DEFAULT_TIMEOUT_S,
 ) -> CheckResult:
+    """``ip_probes`` — пробы «как в VPN» (vpn_like_probes): прокси бракуется,
+    только если там подменён сертификат."""
     result, _ = await _check_as(proxy, probes, timeout)
     if not result.working:
         return result
@@ -132,6 +172,14 @@ async def check_proxy(
             if "CERTIFICATE" in reason.upper():
                 reason = f"подменяет сертификат ({target.host}) — опасен: {reason}"
             return CheckResult(proxy=proxy, working=False, error=reason, checked_at=time.time())
+    for target in ip_probes:
+        try:
+            await asyncio.wait_for(_probe(proxy, target, timeout), timeout=timeout * 2)
+        except ssl.SSLCertVerificationError as exc:
+            reason = f"подменяет сертификат ({target.host} по IP) — опасен: {exc.verify_message or exc}"
+            return CheckResult(proxy=proxy, working=False, error=reason, checked_at=time.time())
+        except _PROBE_ERRORS:
+            pass  # по этому IP не прошло — не повод браковать: сертификат-то не подменён
     return result
 
 
@@ -153,6 +201,7 @@ async def check_all(
     results: list[CheckResult] = []
     done_count = 0
     total = len(proxies)
+    ip_probes = await vpn_like_probes(probes) if any(not is_excluded(p) for p in proxies) else ()
 
     async def _one(p: Proxy) -> None:
         nonlocal done_count
@@ -162,7 +211,8 @@ async def check_all(
         else:
             async with sem:
                 try:
-                    res = await check_proxy(p, probes=probes, required_probes=required_probes, timeout=timeout)
+                    res = await check_proxy(p, probes=probes, required_probes=required_probes,
+                                            ip_probes=ip_probes, timeout=timeout)
                     if res.working and check_udp_support and p.type == ProxyType.SOCKS5:
                         res.udp_ms = await quality.check_udp(p, timeout=min(timeout, 5.0), target=udp_target)
                 except Exception as exc:  # noqa: BLE001 — сбой одного прокси не должен ронять всю проверку

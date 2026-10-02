@@ -6,7 +6,7 @@
       -> страна из источника / кеша; прокси из РФ отсеиваются
       -> быстрый отсев: открыт ли порт (за секунды убирает 80–90%)
       -> полная проверка: HTTPS через прокси + сертификаты + UDP
-      -> страна по IP (ip-api) для рабочих без страны; РФ исключается
+      -> страна и тип сети по IP (ip-api) для рабочих; РФ исключается
       -> замер реальной скорости у рабочих
       -> обновление репутации
 """
@@ -64,13 +64,13 @@ async def run(
     timeout: float = checker.DEFAULT_TIMEOUT_S,
     concurrency: int = checker.DEFAULT_CONCURRENCY,
     on_stage: StageCallback | None = None,
-    lookup_countries=None,
+    lookup_ips=None,
     check_kwargs: dict | None = None,
     speed_kwargs: dict | None = None,
     prefilter_kwargs: dict | None = None,
 ) -> tuple[list[CheckResult], PipelineStats]:
     stage = on_stage or (lambda *_: None)
-    lookup = lookup_countries or geo.lookup_countries
+    lookup = lookup_ips or geo.lookup_ips
     stats = PipelineStats(from_sources=len(proxies))
     now = time.time()
     results: list[CheckResult] = []
@@ -127,17 +127,26 @@ async def run(
         alive, timeout=timeout, concurrency=concurrency,
         on_progress=lambda d, t, _r: stage("Проверка прокси", d, t), **(check_kwargs or {}))
 
-    # 6. страна для РАБОЧИХ, у кого её не было (бесплатный гео-API ограничен
-    #    ~1500 IP за раз — тратим его только на тех, кто реально нужен);
-    #    оказавшиеся в РФ исключаются
-    need_geo = [r.proxy for r in full if r.working and not r.proxy.country_code]
+    # 6. страна и тип сети (провайдер / хостинг) для РАБОЧИХ, у кого их нет в
+    #    кеше (бесплатный гео-API ограничен ~1500 IP за раз — тратим его только
+    #    на тех, кто реально нужен); оказавшиеся в РФ исключаются
+    for r in full:
+        if r.working and (cached := rep.network_of(r.proxy.host)) is not None:
+            r.proxy.network, r.proxy.asn = cached[0], cached[1] or None
+    need_geo = [r.proxy for r in full if r.working and not (r.proxy.country_code and r.proxy.network)]
     if need_geo:
         stage("Определяю страны", 0, len(need_geo))
         found = lookup([p.host for p in need_geo])
-        rep.remember_countries(found)
+        rep.remember_networks({ip: (i.network, i.asn) for ip, i in found.items()})
         for p in need_geo:
-            if p.host in found:
-                p.country_code, p.country = found[p.host][0] or None, found[p.host][1] or None
+            info = found.get(p.host)
+            if info is None:
+                continue
+            if not p.country_code:
+                p.country_code, p.country = info.country_code or None, info.country or None
+                rep.remember_countries({p.host: (info.country_code, info.country)})
+            if info.network:
+                p.network, p.asn = info.network, info.asn or None
         stage("Определяю страны", len(need_geo), len(need_geo))
         for r in full:
             if r.working and filters.is_excluded(r.proxy):

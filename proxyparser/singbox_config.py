@@ -84,18 +84,20 @@ TYPE_FACTOR = {ProxyType.SOCKS5: 1.0, ProxyType.SOCKS4: 0.85, ProxyType.HTTPS: 0
 
 def score(r: CheckResult) -> float:
     """Общая «ценность» прокси: реальная скорость × надёжность по истории ×
-    география × тип. Надёжность 0.5 (новичок) даёт множитель 1.0, проверенный
-    многократно (≈1.0) — 1.5, часто падающий (≈0.2) — 0.7."""
+    география × тип сети × тип прокси. Надёжность 0.5 (новичок) даёт
+    множитель 1.0, проверенный многократно (≈1.0) — 1.5, часто падающий
+    (≈0.2) — 0.7. Сеть провайдера — 1.2, хостинг — 0.9 (см. geo.NETWORK_FACTOR:
+    ТСПУ душит хостинги, а не провайдеров)."""
     speed = r.speed_kbps or 0.0
     return (speed * (0.5 + r.reliability) * geo.geo_factor(r.proxy.country_code)
-            * TYPE_FACTOR.get(r.proxy.type, 1.0))
+            * geo.network_factor(r.proxy.network) * TYPE_FACTOR.get(r.proxy.type, 1.0))
 
 
 def _rank(r: CheckResult) -> tuple:
     """Сначала прокси с хорошей замеренной скоростью (по общей ценности),
-    потом остальные — по надёжности/географии и задержке."""
+    потом остальные — по надёжности/географии/сети и задержке."""
     speed = r.speed_kbps or 0.0
-    bonus = (0.5 + r.reliability) * geo.geo_factor(r.proxy.country_code)
+    bonus = (0.5 + r.reliability) * geo.geo_factor(r.proxy.country_code) * geo.network_factor(r.proxy.network)
     return (0 if speed >= GOOD_SPEED_KBPS else 1, -score(r), -bonus, _latency(r))
 
 
@@ -220,17 +222,6 @@ def filter_countries(results: list[CheckResult], countries: list[str] | None) ->
     if any(r.working for r in kept):
         return kept, True
     return results, False
-
-
-def best_first(results: list[CheckResult]) -> list[CheckResult]:
-    """Все рабочие прокси в порядке «от лучшего»: сначала те, кого фильтр
-    берёт в группу VPN, потом остальные — медленные и нестабильные в конце.
-    Для лёгкого режима, где прокси перебираются по очереди."""
-    chosen, _ = pick_proxies(results, max_proxies=len(results))
-    ids = {id(r) for r in chosen}
-    rest = sorted((r for r in results if r.working and id(r) not in ids),
-                  key=lambda r: (is_slow(r), is_unstable(r), _rank(r)))
-    return chosen + rest
 
 
 def _pick_by_tiers(working: list[CheckResult], max_proxies: int, is_fast) -> tuple[list[CheckResult], list[ProxyType]]:

@@ -19,7 +19,7 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 FIXTURES = pathlib.Path(__file__).resolve().parent / "fixtures"
 
-from proxyparser.checker import ProbeTarget, check_proxy  # noqa: E402
+from proxyparser.checker import ProbeTarget, check_proxy, vpn_like_probes  # noqa: E402
 from proxyparser.models import Proxy, ProxyType  # noqa: E402
 
 
@@ -114,6 +114,14 @@ async def target_204_handler(reader, writer):
     writer.close()
 
 
+def _free_port() -> int:
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
 async def _serve(handler, ssl_ctx=None):
     server = await asyncio.start_server(handler, "127.0.0.1", 0, ssl=ssl_ctx)
     return server, server.sockets[0].getsockname()[1]
@@ -166,6 +174,44 @@ async def main() -> None:
     )
     assert res.working is False and "подменяет сертификат" in (res.error or ""), res
     print("OK: прокси, выборочно подменяющий сертификат DNS-сервера, отбракован как опасный")
+
+    # «как в VPN»: по имени прокси честный, а по IP — поддельный сертификат
+    # (так вёл себя открытый шлюз FortiGate 34.88.38.81:9443)
+    res = await check_proxy(
+        Proxy("127.0.0.1", good_port, ProxyType.SOCKS5),
+        probes=plain_probe,
+        required_probes=(),
+        ip_probes=(ProbeTarget("localhost", mitm_port, tls=True, connect_host="127.0.0.1"),),
+        timeout=2.0,
+    )
+    assert res.working is False and "подменяет сертификат (localhost по IP)" in (res.error or ""), res
+    print("OK: прокси, подменяющий сертификат только при подключении по IP (как ходит VPN), отбракован")
+
+    res = await check_proxy(
+        Proxy("127.0.0.1", good_port, ProxyType.SOCKS5),
+        probes=plain_probe,
+        required_probes=(),
+        ip_probes=(ProbeTarget("localhost", _free_port(), tls=True, connect_host="127.0.0.1"),),
+        timeout=1.0,
+    )
+    assert res.working, res
+    print("OK: просто не открывшийся по IP адрес прокси не бракует — только подмена сертификата")
+
+    assert await vpn_like_probes((ProbeTarget("localhost", 443, True),)) == (
+        ProbeTarget("localhost", 443, True, connect_host="127.0.0.1"),)
+    assert await vpn_like_probes((ProbeTarget("127.0.0.1", 443, True),)) == ()  # и так по IP
+    assert await vpn_like_probes(plain_probe) == ()                               # без TLS сертификата нет
+    loop = asyncio.get_running_loop()
+
+    async def no_dns(*_args, **_kwargs):
+        raise socket.gaierror("нет DNS")
+
+    loop.getaddrinfo = no_dns  # без настоящего DNS-запроса: тесты офлайн
+    try:
+        assert await vpn_like_probes((ProbeTarget("www.gstatic.com", 443, True),)) == ()
+    finally:
+        del loop.getaddrinfo
+    print("OK: проба по IP строится из первой TLS-пробы с именем сайта; IP не узнался — пропускается")
 
     dead = await check_proxy(Proxy("127.0.0.1", 1, ProxyType.SOCKS5), probes=plain_probe, required_probes=(), timeout=1.5)
     assert dead.working is False
