@@ -19,6 +19,7 @@ import socket
 import ssl
 import struct
 import time
+import weakref
 from dataclasses import dataclass
 
 from .models import Proxy, ProxyType
@@ -40,6 +41,12 @@ SPEED_TEST_HOST = "speed.cloudflare.com"
 SPEED_TEST_BYTES = 2_000_000
 SPEED_TEST_MAX_SECONDS = 6.0
 SPEED_MIN_BYTES = 64_000  # меньше (и сервер сам закрыл соединение) — замер недостоверен
+# Данные пошли и встали дольше чем на столько — дальше не ждём. Так выглядит
+# ограничение ТСПУ для зарубежных хостингов (Cloudflare, Hetzner, OVH,
+# DigitalOcean…): соединение «замирает» после первых ~16–32 КБ. Скорость
+# такого прокси — переданное, делённое на всё время с ожиданием, то есть
+# честно низкая; а замер не держит слот все SPEED_TEST_MAX_SECONDS.
+SPEED_STALL_S = 2.5
 SPEED_FAILED = 0.0        # прокси не отдал данные — для VPN не годится
 
 _SSL_CTX = ssl.create_default_context()
@@ -53,6 +60,18 @@ def _stun_request(txid: bytes) -> bytes:
 
 
 _resolved: dict[str, str] = {}
+_failed_at: dict[str, float] = {}   # когда адрес цели не удалось узнать
+RESOLVE_RETRY_S = 300.0             # ...и через сколько пробовать снова
+_resolve_locks: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]" = weakref.WeakKeyDictionary()
+
+
+def _resolve_lock() -> asyncio.Lock:
+    """Один поиск адреса за раз (замок — свой для каждого цикла событий)."""
+    loop = asyncio.get_running_loop()
+    lock = _resolve_locks.get(loop)
+    if lock is None:
+        lock = _resolve_locks[loop] = asyncio.Lock()
+    return lock
 
 
 def _is_real_ip(ip: str) -> bool:
@@ -83,14 +102,26 @@ def _doh_lookup(host: str, timeout: float = 8.0) -> str | None:
 
 async def _resolve_udp_target(target: tuple[str, int]) -> str | None:
     """IPv4 цели UDP-проверки (в SOCKS5-заголовке шлём IP); кешируется.
-    Сначала DoH, потом системный DNS — но только с настоящим публичным адресом."""
+    Сначала DoH, потом системный DNS — но только с настоящим публичным адресом.
+
+    Проверки UDP идут параллельно у десятков прокси: адрес ищет одна, остальные
+    ждут её результата. Неудача тоже запоминается на RESOLVE_RETRY_S — иначе
+    там, где DoH закрыт, каждая проверка заново ждала бы его таймаут (8 с,
+    занимая место в полной проверке) и писала бы в журнал то же предупреждение."""
     host = target[0]
     if host in _resolved:
         return _resolved[host]
     try:
         socket.inet_aton(host)
-        ip: str | None = host  # уже IP (в том числе локальный — в тестах)
+        _resolved[host] = host  # уже IP (в том числе локальный — в тестах)
+        return host
     except OSError:
+        pass
+    async with _resolve_lock():
+        if host in _resolved:
+            return _resolved[host]
+        if time.monotonic() - _failed_at.get(host, float("-inf")) < RESOLVE_RETRY_S:
+            return None
         try:
             ip = await asyncio.to_thread(_doh_lookup, host)
         except Exception as exc:  # noqa: BLE001
@@ -104,10 +135,11 @@ async def _resolve_udp_target(target: tuple[str, int]) -> str | None:
             except OSError as exc:
                 log.debug("Не удалось узнать адрес %s: %s", host, exc)
         if ip is None:
+            _failed_at[host] = time.monotonic()
             log.warning("Не удалось узнать настоящий адрес %s для проверки UDP", host)
             return None
-    _resolved[host] = ip
-    return ip
+        _resolved[host] = ip
+        return ip
 
 
 def _dns_query(txid: int, name: str = "example.com") -> bytes:
@@ -277,13 +309,15 @@ async def measure_speed(
     target: SpeedTarget = SpeedTarget(),
     timeout: float = 6.0,
     max_seconds: float = SPEED_TEST_MAX_SECONDS,
+    stall_s: float = SPEED_STALL_S,
 ) -> float | None:
     """Скорость скачивания через прокси, КБ/с.
 
     * ``0.0`` — прокси не смог отдать данные (туннель/TLS не установились,
       данные не пошли): для VPN он бесполезен.
-    * маленькое число — данные шли, но медленно (раньше такие получали
-      None, «неизвестно», и пролезали в VPN наравне с быстрыми).
+    * маленькое число — данные шли, но медленно или встали посреди замера
+      (раньше такие получали None, «неизвестно», и пролезали в VPN наравне
+      с быстрыми).
     * ``None`` — судить нельзя: тестовый сервер ответил не 200 (например,
       ограничил частоту запросов) или отдал слишком мало данных и закрыл
       соединение раньше времени.
@@ -313,8 +347,11 @@ async def measure_speed(
         eof = False
         end = time.monotonic() + max_seconds
         while time.monotonic() < end:
+            wait = max(0.1, end - time.monotonic())
+            if first_byte_at is not None:
+                wait = min(wait, stall_s)
             try:
-                chunk = await asyncio.wait_for(reader.read(65536), max(0.1, end - time.monotonic()))
+                chunk = await asyncio.wait_for(reader.read(65536), wait)
             except asyncio.TimeoutError:
                 break
             if not chunk:

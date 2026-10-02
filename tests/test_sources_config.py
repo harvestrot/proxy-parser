@@ -83,6 +83,41 @@ def main():
     print("OK: повреждённый sources.json -> встроенные источники (файл пользователя не перезаписывается)")
     assert tmp.read_text(encoding="utf-8") == "{ сломанный json"
 
+    # обновление программы: нетронутый sources.json прошлой версии заменяется
+    # новыми источниками (старый — рядом), правленный руками не трогается
+    for old_sources in sources_config._OLD_DEFAULTS:
+        d = pathlib.Path(tempfile.mkdtemp())
+        f = d / "sources.json"
+        old_cfg = {"_help": "…", "sources": [
+            {"name": f"s{i}", "kind": kind, "enabled": enabled, "_note": "замер",
+             **({"url": url} if url else {}), **({"type": ptype} if ptype else {}),
+             **({} if limit == sources_config.DEFAULT_PLAIN_LIMIT else {"limit": limit})}
+            for i, (kind, url, ptype, enabled, limit) in enumerate(old_sources)]}
+        f.write_text(json.dumps(old_cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+        got = sources_config.load_sources(f)
+        new_cfg = json.loads(f.read_text(encoding="utf-8"))
+        assert new_cfg["version"] == sources_config.CONFIG_VERSION, new_cfg.get("version")
+        assert list(got) == [s["name"] for s in sources_config.DEFAULT_CONFIG["sources"] if s.get("enabled")]
+        assert json.loads((d / "sources.old.json").read_text(encoding="utf-8")) == old_cfg
+        # кнопка «Источники…» (ensure_file) тоже открывает уже обновлённый файл
+        f.write_text(json.dumps(old_cfg, ensure_ascii=False), encoding="utf-8")
+        assert json.loads(sources_config.ensure_file(f).read_text(encoding="utf-8"))["version"] == \
+            sources_config.CONFIG_VERSION
+    print("OK: нетронутый sources.json прошлых версий обновлён до новых источников (старый сохранён)")
+
+    d = pathlib.Path(tempfile.mkdtemp())
+    f = d / "sources.json"
+    edited = {"sources": [{"name": "мой", "kind": "plain", "url": "http://my", "type": "socks5"}]}
+    f.write_text(json.dumps(edited, ensure_ascii=False), encoding="utf-8")
+    assert list(sources_config.load_sources(f)) == ["мой"]
+    assert json.loads(f.read_text(encoding="utf-8")) == edited and not (d / "sources.old.json").exists()
+    print("OK: sources.json с правками пользователя не перезаписывается")
+
+    repo_file = pathlib.Path(__file__).resolve().parents[1] / "sources.json"
+    assert json.loads(repo_file.read_text(encoding="utf-8")) == json.loads(
+        json.dumps(sources_config.DEFAULT_CONFIG, ensure_ascii=False)), "sources.json в репозитории устарел"
+    print("OK: sources.json в репозитории совпадает с источниками по умолчанию")
+
     print("\nВсе тесты sources_config.py прошли.")
 
 

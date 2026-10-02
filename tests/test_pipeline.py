@@ -146,6 +146,23 @@ async def main():
     assert rep2.entries == {}
     print("OK: если не ответил вообще никто — ошибка «проверь интернет», репутация не портится")
 
+    # «ферма»: много портов одного IP — проверяются не все; работавший раньше — всегда
+    rep3 = Reputation.load(pathlib.Path(tempfile.mkdtemp()) / "rep.json")
+    farm_good = Proxy("127.0.0.6", ports[0], ProxyType.SOCKS5, country_code="DE")
+    farm_dead = [Proxy("127.0.0.6", free_port(), ProxyType.SOCKS5, country_code="DE") for _ in range(5)]
+    old_good = Proxy("127.0.0.6", ports[1], ProxyType.SOCKS5, country_code="DE")
+    rep3.update([CheckResult(old_good, True, latency_ms=10)])
+    results, st = await pipeline.run(
+        [farm_good] + farm_dead + [old_good], rep3, timeout=2, lookup_countries=fake_lookup,
+        check_kwargs={"probes": (checker.ProbeTarget("127.0.0.1", t_port, False),), "required_probes": (),
+                      "udp_target": ("127.0.0.1", 9)},
+        speed_kwargs={"target": quality.SpeedTarget("127.0.0.1", t_port, tls=False, path="/big")},
+        prefilter_kwargs={"timeout": 1})
+    checked = {r.proxy.port for r in results}
+    assert st.skipped_farms == 5 and len(results) == 2, (st, checked)
+    assert checked == {farm_good.port, old_good.port}
+    print("OK: лишние порты «фермы» не проверяются; работавший раньше прокси с того же IP — проверяется")
+
     for s in servers + [t_srv]:
         s.close()
     print("\nВсе тесты pipeline.py прошли.")

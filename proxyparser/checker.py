@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from .filters import EXCLUDE_REASON, is_excluded
 from . import quality
 from .models import CheckResult, Proxy, ProxyType
+from .scraper import subnet24
 from .upstream import UpstreamError, UpstreamUnreachable, connect_via
 
 log = logging.getLogger(__name__)
@@ -177,8 +178,10 @@ async def check_all(
     return results
 
 
-SPEED_TEST_TOP = 250         # замеряем практически всех рабочих: прокси без замера в VPN
+SPEED_TEST_TOP = 300         # замеряем практически всех рабочих: прокси без замера в VPN
                              # идут лишь в крайнем случае, а медленные — не идут вовсе
+SPEED_TEST_PER_SUBNET = 2    # в первую очередь — не больше стольких из одной подсети /24
+                             # (столько же из неё берёт VPN), остальные — если хватит мест
 SPEED_TEST_CONCURRENCY = 10  # немного параллельно — чтобы не упереться в свой же канал
                              # (иначе замер покажет нашу скорость, а не прокси)
 
@@ -192,13 +195,26 @@ async def measure_top_speeds(
     on_progress=None,
 ) -> int:
     """Замерить реальную скорость у ``top`` самых быстрых по задержке рабочих
-    прокси (результаты дополняются на месте). Возвращает, сколько замерено."""
-    candidates = sorted(
+    прокси (результаты дополняются на месте). Возвращает, сколько замерено.
+
+    Места распределяются по подсетям: сначала не больше
+    SPEED_TEST_PER_SUBNET лучших из каждой /24, потом остальные. Иначе
+    десятки рабочих портов одной «фермы» с малой задержкой занимают весь
+    замер, а прокси из других сетей остаются без скорости — и в VPN не
+    попадают."""
+    by_latency = sorted(
         (r for r in results if r.working),
         # по задержке, тип не важен: в основную группу VPN теперь попадают
         # и быстрые HTTPS-прокси
         key=lambda r: r.latency_ms if r.latency_ms is not None else float("inf"),
-    )[:top]
+    )
+    first, rest = [], []
+    per_net: dict[str, int] = {}
+    for r in by_latency:
+        net = subnet24(r.proxy.host)
+        per_net[net] = per_net.get(net, 0) + 1
+        (first if per_net[net] <= SPEED_TEST_PER_SUBNET else rest).append(r)
+    candidates = (first + rest)[:top]
     sem = asyncio.Semaphore(concurrency)
     done = 0
     measured = 0

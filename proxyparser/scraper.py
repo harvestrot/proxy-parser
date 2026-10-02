@@ -4,9 +4,22 @@
   * proxyscrape.com — сама страница рисуется на JS (и закрыта Cloudflare),
     но данные она берёт из открытого API ``api.proxyscrape.com`` — его и
     используем: JSON с типом, страной, аптаймом и их замером скорости.
+    Если API не открылся (сайт за Cloudflare, а Cloudflare из РФ режется:
+    соединение «замирает» после ~16 КБ), те же данные берутся из их зеркала
+    на GitHub.
 
 Загрузка страниц вынесена в ``fetch(url) -> str``: по умолчанию напрямую,
 а если источник недоступен — можно подставить загрузку через прокси.
+
+«Фермы». По замеру 2 октября 2026 почти все публичные списки SOCKS5 забиты
+одной фермой (45.74.31.0/24: 10 IP, 31 тыс. портов — 50–85% каждого списка,
+у proxyscrape и proxifly тоже). Это одна точка, которая пересылает трафик на
+чужие прокси; для VPN из неё всё равно берутся максимум 2 прокси, а проверка
+тысяч её портов съедает лимиты источников, забивает роутер и вытесняет из
+замера скорости остальных.
+Поэтому с одного IP берётся не больше ``FARM_MAX_PER_IP`` портов, а из одной
+подсети /24 — не больше ``FARM_MAX_PER_SUBNET`` адресов (случайная выборка,
+за несколько обновлений пройдётся вся ферма).
 """
 from __future__ import annotations
 
@@ -15,6 +28,7 @@ import json
 import logging
 import random
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Callable
 from urllib.parse import urlencode
@@ -42,8 +56,15 @@ PROXYSCRAPE_API = "https://api.proxyscrape.com/v4/free-proxy-list/get"
 # сортируем по аптайму. SOCKS5 в приоритете — их больше всего.
 PROXYSCRAPE_LIMITS = {"socks5": 500, "socks4": 150, "http": 200}
 PROXYSCRAPE_MAX_TIMEOUT_MS = 3000
+# Зеркало API на GitHub (обновляется каждые 5 минут): raw.githubusercontent.com
+# открывается из РФ, когда сам API (за Cloudflare) не грузится.
+PROXYSCRAPE_GITHUB = "https://raw.githubusercontent.com/proxyscrape/free-proxy-list/main/proxies/protocols/{protocol}/data.json"
+PROXYSCRAPE_GITHUB_MAX_AGE_S = 3 * 3600  # проверенные давнее — скорее всего, уже мертвы
 
 _PS_TYPES = {"socks5": ProxyType.SOCKS5, "socks4": ProxyType.SOCKS4, "http": ProxyType.HTTPS}
+
+FARM_MAX_PER_IP = 2       # портов с одного IP (несколько портов одного IP — один оператор)
+FARM_MAX_PER_SUBNET = 6   # адресов из одной подсети /24 (в VPN из неё всё равно идут максимум 2)
 
 
 @dataclass
@@ -98,10 +119,11 @@ def proxyscrape_url(protocol: str) -> str:
     return f"{PROXYSCRAPE_API}?{urlencode(query)}"
 
 
-def parse_proxyscrape(text: str, limit: int | None = None) -> list[Proxy]:
-    data = json.loads(text)
-    items = [p for p in data.get("proxies", []) if p.get("alive", True)]
-    items.sort(key=lambda p: p.get("uptime") or 0, reverse=True)
+def _proxyscrape_items(items: list[dict], limit: int | None, *, uptime_key: str, latency_key: str,
+                       country, country_code) -> list[Proxy]:
+    """Общая часть разбора API и зеркала: лучшие по аптайму первыми, без
+    HTTP без HTTPS, без мусорных адресов и без лишних портов «ферм»."""
+    items = sorted(items, key=lambda p: p.get(uptime_key) or 0, reverse=True)
     out: list[Proxy] = []
     for p in items:
         ptype = _PS_TYPES.get(str(p.get("protocol", "")).lower())
@@ -112,32 +134,69 @@ def parse_proxyscrape(text: str, limit: int | None = None) -> list[Proxy]:
             continue
         try:
             host, port = str(p["ip"]), int(p["port"])
-        except (KeyError, ValueError):
+        except (KeyError, ValueError, TypeError):
             continue
-        timeout = p.get("timeout")
+        if not 0 < port < 65536 or not _is_public_ipv4(host):
+            continue
+        latency = p.get(latency_key)
         out.append(Proxy(
             host=host, port=port, type=ptype,
-            country=(p.get("ip_data") or {}).get("country"),
-            country_code=(p.get("ip_data") or {}).get("countryCode"),
+            country=country(p), country_code=country_code(p),
             anonymity=p.get("anonymity"),
-            source_latency_ms=int(timeout) if isinstance(timeout, (int, float)) else None,
+            source_latency_ms=int(latency) if isinstance(latency, (int, float)) else None,
             source="proxyscrape.com",
         ))
-        if limit is not None and len(out) >= limit:
-            break
-    return out
+    # фермы режем до лимита: иначе лучшие по аптайму места займёт одна ферма
+    out = limit_farms(out)
+    return out if limit is None else out[:limit]
+
+
+def parse_proxyscrape(text: str, limit: int | None = None) -> list[Proxy]:
+    data = json.loads(text)
+    items = [p for p in data.get("proxies", []) if isinstance(p, dict) and p.get("alive", True)]
+    return _proxyscrape_items(
+        items, limit, uptime_key="uptime", latency_key="timeout",
+        country=lambda p: (p.get("ip_data") or {}).get("country"),
+        country_code=lambda p: (p.get("ip_data") or {}).get("countryCode"))
+
+
+def parse_proxyscrape_github(text: str, limit: int | None = None, now: float | None = None) -> list[Proxy]:
+    """Зеркало на GitHub: список объектов с ``uptime_percent``, ``latency_ms``
+    и ``last_checked``. Как и в запросе к API, берём только с откликом до
+    PROXYSCRAPE_MAX_TIMEOUT_MS и проверенные недавно."""
+    now = now or time.time()
+    data = json.loads(text)
+    items = [p for p in (data if isinstance(data, list) else []) if isinstance(p, dict)
+             and isinstance(p.get("latency_ms"), (int, float)) and p["latency_ms"] <= PROXYSCRAPE_MAX_TIMEOUT_MS
+             and now - (p.get("last_checked") or 0) <= PROXYSCRAPE_GITHUB_MAX_AGE_S]
+    return _proxyscrape_items(
+        items, limit, uptime_key="uptime_percent", latency_key="latency_ms",
+        country=lambda p: p.get("country"), country_code=lambda p: p.get("country_code"))
 
 
 def scrape_proxyscrape(fetch: Fetcher) -> list[Proxy]:
+    """API proxyscrape, а если он не открылся — его зеркало на GitHub. После
+    первой неудачи с API остальные типы сразу берутся из зеркала: если API
+    не открылся раз, то и следующие запросы, скорее всего, ждали бы тот же
+    таймаут."""
     out: list[Proxy] = []
     errors = []
+    api_ok = True
     for protocol, limit in PROXYSCRAPE_LIMITS.items():
+        if api_ok:
+            try:
+                out += parse_proxyscrape(fetch(proxyscrape_url(protocol)), limit)
+                continue
+            except Exception as exc:  # noqa: BLE001 — в т.ч. SourceProtected: зеркало защитой не закрыто
+                api_ok = False
+                errors.append(f"API: {exc}")
+                log.info("proxyscrape: API не открылся (%s) — беру зеркало на GitHub", exc)
         try:
-            out += parse_proxyscrape(fetch(proxyscrape_url(protocol)), limit)
+            out += parse_proxyscrape_github(fetch(PROXYSCRAPE_GITHUB.format(protocol=protocol)), limit)
         except SourceProtected:
-            raise  # защита от ботов — не перебираем остальные запросы
+            raise
         except Exception as exc:  # noqa: BLE001
-            errors.append(f"{protocol}: {exc}")
+            errors.append(f"GitHub {protocol}: {exc}")
     if not out and errors:
         raise RuntimeError("; ".join(errors))
     return merge(out)
@@ -216,9 +275,11 @@ def plain_source(name: str, url: str, default_type: ProxyType | None, limit: int
         found = merge(parse_plain_list(fetch(url), default_type, name))
         if not found:
             raise RuntimeError("в списке не нашлось ни одного прокси (неверная ссылка или формат?)")
-        if limit is not None and len(found) > limit:
-            found = (rng or random).sample(found, limit)
-        return found
+        # перемешать, урезать фермы и только потом брать лимит — иначе
+        # выборка почти целиком состоит из портов одной фермы
+        (rng or random).shuffle(found)
+        found = limit_farms(found)
+        return found if limit is None else found[:limit]
     return collect
 
 
@@ -231,11 +292,47 @@ SOURCES: dict[str, Callable[[Fetcher], list[Proxy]]] = {
 
 
 def merge(proxies: list[Proxy]) -> list[Proxy]:
-    """Убрать дубли по host:port (первый встреченный остаётся)."""
+    """Убрать дубли по host:port (первый встреченный остаётся). Если у первого
+    нет страны, а у дубля из другого источника есть — страна берётся оттуда:
+    прокси из РФ тогда отсеиваются ещё до проверки."""
     best: dict[tuple[str, int], Proxy] = {}
     for p in proxies:
-        best.setdefault((p.host, p.port), p)
+        kept = best.setdefault((p.host, p.port), p)
+        if kept is not p and not kept.country_code and p.country_code:
+            kept.country, kept.country_code = p.country, p.country_code
     return list(best.values())
+
+
+def subnet24(host: str) -> str:
+    parts = host.split(".")
+    return ".".join(parts[:3]) if len(parts) == 4 else host
+
+
+def limit_farms(proxies: list[Proxy], per_ip: int = FARM_MAX_PER_IP, per_subnet: int = FARM_MAX_PER_SUBNET,
+                keep: set[tuple[str, int]] | None = None) -> list[Proxy]:
+    """Оставить (в том же порядке) не больше ``per_ip`` портов с одного IP и
+    ``per_subnet`` адресов из одной подсети /24 — см. «Фермы» в начале модуля.
+    Адреса из ``keep`` (уже показавшие себя прокси) остаются всегда, но
+    занимают места в лимите."""
+    by_ip: dict[str, int] = {}
+    by_net: dict[str, int] = {}
+    if keep:
+        for p in proxies:
+            if (p.host, p.port) in keep:
+                by_ip[p.host] = by_ip.get(p.host, 0) + 1
+                by_net[subnet24(p.host)] = by_net.get(subnet24(p.host), 0) + 1
+    out: list[Proxy] = []
+    for p in proxies:
+        if keep and (p.host, p.port) in keep:
+            out.append(p)
+            continue
+        net = subnet24(p.host)
+        if by_ip.get(p.host, 0) >= per_ip or by_net.get(net, 0) >= per_subnet:
+            continue
+        by_ip[p.host] = by_ip.get(p.host, 0) + 1
+        by_net[net] = by_net.get(net, 0) + 1
+        out.append(p)
+    return out
 
 
 def scrape(
