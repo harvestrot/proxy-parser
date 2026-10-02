@@ -10,7 +10,6 @@
     ("progress", done: int, total: int)
     ("results", list[CheckResult])     — новый список рабочих прокси
     ("busy", bool)                      — идёт сбор/проверка
-    ("router", bool)                     — лёгкий режим запущен/остановлен
     ("vpn", "off" | "connecting" | "on")
     ("vpn_info", str, "ok" | "wait" | "warn")  — через какой прокси идём, сколько живых
     ("error", str)
@@ -30,8 +29,8 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
-from . import (app_routing, app_settings, checker, local_router, netpath, pipeline, scraper, singbox_config,
-               singbox_manager, source_stats, storage)
+from . import (app_routing, app_settings, checker, netpath, pipeline, scraper, singbox_config, singbox_manager,
+               source_stats, storage)
 from .reputation import Reputation
 from .models import CheckResult
 
@@ -60,7 +59,6 @@ class AppController:
 
         self.results: list[CheckResult] = storage.load_working_proxies()
         self.busy = False
-        self._router_future: concurrent.futures.Future | None = None
         self._singbox = singbox_manager.SingBoxProcess()
         self._vpn_state = "off"
         self._vpn_stop_requested = False
@@ -305,43 +303,6 @@ class AppController:
         self._pending_asks.remove(holder)
         return holder["answer"]
 
-    # ---------- лёгкий режим (локальный SOCKS5) ----------
-
-    @property
-    def router_running(self) -> bool:
-        return self._router_future is not None and not self._router_future.done()
-
-    def start_router(self, port: int) -> None:
-        if self.router_running:
-            return
-        if not self.results:
-            self._emit("error", "Сначала обнови список прокси — рабочих пока нет")
-            return
-        # те же предпочтения, что и у VPN: страны и закреплённый прокси
-        pool, _ = singbox_config.filter_countries(list(self.results), self.settings.countries)
-        pin = self.settings.pinned_address
-        if pin and not any(r.proxy.address == pin for r in pool):
-            pool += [r for r in self.results if r.proxy.address == pin]
-        fut = self._submit(local_router.serve(pool, port=port, pinned=pin))
-        self._router_future = fut
-
-        def _done(f: concurrent.futures.Future) -> None:
-            self._emit("router", False)
-            if f.cancelled():
-                log.info("Локальный SOCKS5 остановлен")
-                return
-            exc = f.exception()
-            if exc is not None:
-                self._emit("error", f"Локальный SOCKS5 не запустился: {exc}")
-
-        fut.add_done_callback(_done)
-        self._emit("router", True)
-        log.info("Локальный SOCKS5 запущен: 127.0.0.1:%d", port)
-
-    def stop_router(self) -> None:
-        if self._router_future is not None:
-            self._router_future.cancel()
-
     # ---------- VPN (sing-box + TUN) ----------
 
     def connect_vpn(self) -> None:
@@ -461,8 +422,6 @@ class AppController:
         if changed_vpn and self._singbox.running and self.results:
             self._emit("status", "Применяю настройки...")
             self._submit(asyncio.to_thread(self._restart_vpn_safely))
-        if changed_vpn and self.router_running:
-            log.info("Лёгкий режим применит новые настройки после перезапуска")
 
     def pin_proxy(self, address: str | None) -> None:
         """Закрепить прокси для VPN (None — открепить, снова автовыбор)."""
@@ -618,7 +577,6 @@ class AppController:
         for holder in list(self._pending_asks):
             holder["event"].set()
         self._kill_singbox()
-        self.stop_router()
         if self._singbox_log is not None:
             try:
                 self._singbox_log.close()

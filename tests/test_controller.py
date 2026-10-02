@@ -31,7 +31,7 @@ reputation.REPUTATION_FILE = TMP / "reputation.json"
 from proxyparser import app_routing, app_settings  # noqa: E402
 app_routing.ROUTING_FILE = TMP / "routing.json"  # не трогать настоящие настройки
 app_settings.SETTINGS_FILE = TMP / "settings.json"
-geo.lookup_countries = lambda ips, post=None: {}  # без сети
+geo.lookup_ips = lambda ips, post=None: {}  # без сети
 
 
 def _start_fake_network() -> tuple[int, int]:
@@ -300,19 +300,7 @@ def main() -> None:
     assert len(results) == 1 and results[0].proxy.port == good_port, results
     print(f"OK: refresh — {len(results)} рабочий из 2, события: {sorted(set(kinds))}")
 
-    # 2) лёгкий режим
-    router_port = _free_port()
-    ctl.start_router(router_port)
-    _drain(ctl, lambda e: e == ("router", True))
-    time.sleep(0.3)
-    with socket.create_connection(("127.0.0.1", router_port), timeout=2) as s:
-        s.sendall(b"\x05\x01\x00")
-        assert s.recv(2) == b"\x05\x00"
-    ctl.stop_router()
-    _drain(ctl, lambda e: e == ("router", False))
-    print("OK: лёгкий режим запускается, принимает SOCKS5-клиента и останавливается")
-
-    # 3) VPN с заглушкой sing-box
+    # 2) VPN с заглушкой sing-box
     fake_exe = _fake_singbox("sing-box", "INFO sing-box started (0.01s)", None)
     singbox_manager.find_singbox = lambda: fake_exe
 
@@ -416,7 +404,7 @@ def main() -> None:
     _test_pin_failover(ctl)
     _test_auto_refresh_and_startup(ctl)
 
-    # 4) неожиданное падение sing-box -> ошибка в GUI
+    # 3) неожиданное падение sing-box -> ошибка в GUI
     crash_exe = _fake_singbox("sing-box-crash", "FATAL bad config", 1)
     singbox_manager.find_singbox = lambda: crash_exe
     ctl.connect_vpn()

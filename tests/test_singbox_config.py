@@ -125,6 +125,22 @@ def test_reliability_and_geo_in_ranking():
     print("OK: при близкой скорости первым идёт надёжный и географически близкий прокси")
 
 
+def test_isp_network_ahead_of_hosting():
+    def res(host, speed, network):
+        return CheckResult(Proxy(host, 1080, ProxyType.HTTPS, country_code="SE", network=network), True,
+                           latency_ms=130, speed_kbps=speed)
+    results = [
+        res("4.0.0.1", 2900, "hosting"),  # чуть быстрее по замеру, но хостинг (его ТСПУ может придушить)
+        res("4.0.1.1", 2700, "isp"),      # сеть обычного провайдера
+        res("4.0.2.1", 2700, None),       # тип сети неизвестен
+        res("4.0.3.1", 6000, "hosting"),  # намного быстрее — хостинг не мешает быть первым
+    ]
+    chosen, _ = pick_proxies(results)
+    hosts = [c.proxy.host for c in chosen]
+    assert hosts == ["4.0.3.1", "4.0.1.1", "4.0.2.1", "4.0.0.1"], hosts
+    print("OK: при близкой скорости сеть провайдера впереди хостинга; намного более быстрый хостинг — первый")
+
+
 def test_bypass_rule_for_own_process():
     config, _ = build_config([r("1.0.0.1", ProxyType.SOCKS5, 400)], bypass_process_paths=[r"C:\\Py\\pythonw.exe", r"C:\\Py\\pythonw.exe"])
     rules = config["route"]["rules"]
@@ -342,6 +358,7 @@ if __name__ == "__main__":
     test_group_only_speed_proven_when_enough()
     test_udp_group_and_discord_fallback()
     test_reliability_and_geo_in_ranking()
+    test_isp_network_ahead_of_hosting()
     test_bypass_rule_for_own_process()
     test_subnet_diversity()
     test_latency_matters_and_fast_https_not_lost()

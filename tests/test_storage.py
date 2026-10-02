@@ -14,11 +14,14 @@ from proxyparser.reputation import Reputation  # noqa: E402
 
 def main():
     tmp = pathlib.Path(tempfile.mkdtemp())
-    good = CheckResult(Proxy("8.8.8.8", 1080, ProxyType.SOCKS5, country="Германия"), True, latency_ms=100, speed_kbps=900)
+    good = CheckResult(Proxy("8.8.8.8", 1080, ProxyType.SOCKS5, country="Германия", network="isp",
+                             asn="AS29518 Bredband2 AB"), True, latency_ms=100, speed_kbps=900)
 
     path = tmp / "working.json"
     storage.save_results([good], path)
-    assert [r.proxy.address for r in storage.load_working_proxies(path)] == ["8.8.8.8:1080"]
+    loaded = storage.load_working_proxies(path)
+    assert [r.proxy.address for r in loaded] == ["8.8.8.8:1080"]
+    assert (loaded[0].proxy.network, loaded[0].proxy.asn) == ("isp", "AS29518 Bredband2 AB")  # для колонки «Сеть»
     assert not list(tmp.glob("*.tmp")), "временный файл должен исчезнуть после записи"
     print("OK: запись через временный файл, после неё на диске только целый файл")
 

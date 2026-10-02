@@ -11,7 +11,10 @@
 * «отдых» — прокси, ни разу не работавшие и упавшие много раз подряд,
   сутки не проверяются (экономит время);
 * проверенные прокси перепроверяются, даже если пропали из источников;
-* страна по IP кешируется, чтобы не спрашивать её повторно.
+  быстрые (как и прокси с UDP) — после первой же удачной проверки и неделю:
+  их мало, а бесплатные списки то теряют, то снова находят один и тот же
+  прокси;
+* страна и тип сети по IP кешируются, чтобы не спрашивать их повторно.
 
 Хранится в results/reputation.json.
 """
@@ -36,7 +39,8 @@ COOLDOWN_AFTER_FAILS = 2          # столько провалов подряд
 COOLDOWN_SECONDS = 24 * 3600
 PROVEN_MIN_OK = 2                 # «проверенный» — прошёл хотя бы 2 проверки...
 PROVEN_MAX_AGE = 48 * 3600        # ...и работал не позже чем 48 ч назад
-UDP_PROVEN_MAX_AGE = 7 * 24 * 3600  # прокси с UDP: одной проверки хватает, помним неделю
+RARE_PROVEN_MAX_AGE = 7 * 24 * 3600  # редкие (с UDP или быстрые): одной проверки хватает, помним неделю
+FAST_PROVEN_KBPS = 500            # «быстрый» — тот же порог, что и для группы VPN (singbox_config.GOOD_SPEED_KBPS)
 FORGET_AFTER = 7 * 24 * 3600      # не встречался неделю — забываем (кроме чёрного списка)
 FORGET_DEAD_AFTER = 3 * 24 * 3600 # ни разу не работавшие — забываем быстрее
 EMA_ALPHA = 0.4                   # вес последнего замера в сглаженных средних
@@ -86,6 +90,7 @@ def _key(p: Proxy) -> str:
 class Reputation:
     entries: dict[str, Entry] = field(default_factory=dict)
     countries: dict[str, list[str]] = field(default_factory=dict)  # ip -> [код, название]
+    networks: dict[str, list[str]] = field(default_factory=dict)   # ip -> [тип сети, ASN]
     path: pathlib.Path = REPUTATION_FILE
 
     # ------------------------------------------------------------ файл
@@ -118,6 +123,7 @@ class Reputation:
             except (ValueError, TypeError):
                 continue
         rep.countries = {k: v for k, v in data.get("countries", {}).items() if isinstance(v, list) and len(v) == 2}
+        rep.networks = {k: v for k, v in data.get("networks", {}).items() if isinstance(v, list) and len(v) == 2}
         return rep
 
     def save(self) -> None:
@@ -135,6 +141,7 @@ class Reputation:
             "entries": full,
             "dead": dead,
             "countries": self.countries,
+            "networks": self.networks,
         }
         write_atomic(self.path, json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
 
@@ -160,10 +167,10 @@ class Reputation:
         for e in self.entries.values():
             if e.mitm or e.last_ok is None:
                 continue
-            if e.udp_ok:
-                # прокси с настоящим UDP — редкость (≈2% рабочих SOCKS5): хватает
-                # одной успешной проверки, и помним такой неделю, а не двое суток
-                if now - e.last_ok <= UDP_PROVEN_MAX_AGE:
+            if e.udp_ok or (e.speed_kbps or 0) >= FAST_PROVEN_KBPS:
+                # прокси с настоящим UDP (≈2% рабочих SOCKS5) и быстрые — редкость:
+                # хватает одной успешной проверки, и помним такой неделю, а не двое суток
+                if now - e.last_ok <= RARE_PROVEN_MAX_AGE:
                     out.append(e.to_proxy())
             elif e.ok >= PROVEN_MIN_OK and now - e.last_ok <= PROVEN_MAX_AGE:
                 out.append(e.to_proxy())
@@ -176,6 +183,16 @@ class Reputation:
     def remember_countries(self, found: dict[str, tuple[str, str]]) -> None:
         for ip, (code, name) in found.items():
             self.countries[ip] = [code, name]
+
+    def network_of(self, host: str) -> tuple[str, str] | None:
+        """(тип сети, ASN) из кеша."""
+        v = self.networks.get(host)
+        return (v[0], v[1]) if v else None
+
+    def remember_networks(self, found: dict[str, tuple[str, str]]) -> None:
+        for ip, (network, asn) in found.items():
+            if network:
+                self.networks[ip] = [network, asn]
 
     def annotate(self, r: CheckResult) -> None:
         """Дописать в результат надёжность из истории (для таблицы и выбора)."""

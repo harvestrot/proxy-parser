@@ -32,6 +32,8 @@ class Proxy:
     source_latency_ms: int | None = None  # скорость, которую заявил сайт-источник
     source: str | None = None  # откуда взят, например "proxyscrape.com"
     country_code: str | None = None  # ISO-код страны, например "DE"
+    network: str | None = None  # тип сети: "isp" / "mobile" / "hosting" (geo.NET_*), None — неизвестно
+    asn: str | None = None  # «AS29518 Bredband2 AB»
 
     @property
     def address(self) -> str:

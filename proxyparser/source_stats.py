@@ -2,8 +2,9 @@
 
 После каждого обновления для каждого источника считается: сколько прокси он
 дал, сколько из них живы (порт открыт), сколько прошли полную проверку,
-сколько быстрых (замеренная скорость от 500 КБ/с), сколько с UDP и сколько
-рабочих есть ТОЛЬКО у него (уникальный вклад). Если один прокси есть в
+сколько быстрых (замеренная скорость от 500 КБ/с), сколько с UDP, сколько в
+сетях обычных провайдеров, а не хостингов (их ТСПУ не душит — см. geo.py), и
+сколько рабочих есть ТОЛЬКО у него (уникальный вклад). Если один прокси есть в
 нескольких списках, он засчитывается каждому из них.
 
 Итоги копятся в results/source_stats.json (последние запуски + суммы), чтобы
@@ -16,7 +17,7 @@ import pathlib
 import time
 from dataclasses import asdict, dataclass
 
-from . import checker, filters, singbox_config, storage
+from . import checker, filters, geo, singbox_config, storage
 from .models import CheckResult
 from .paths import APP_DIR
 
@@ -32,6 +33,7 @@ class SourceRow:
     working: int = 0
     fast: int = 0
     udp: int = 0
+    isp: int = 0  # рабочих в сети провайдера или мобильной (не хостинг)
     unique_working: int = 0
 
     @property
@@ -62,15 +64,17 @@ def compute(members: dict[str, list[str]], results: list[CheckResult]) -> dict[s
                 row.working += 1
                 row.fast += (r.speed_kbps or 0) >= FAST_KBPS
                 row.udp += r.udp
+                row.isp += r.proxy.network in (geo.NET_ISP, geo.NET_MOBILE)
                 row.unique_working += working_sources.get(a) == {name}
         rows[name] = row
     return rows
 
 
 def format_table(rows: dict[str, SourceRow]) -> list[str]:
-    lines = ["Источник                  дал   живых  рабочих  быстрых  с UDP  уникальных  % рабочих"]
+    lines = ["Источник                  дал   живых  рабочих  быстрых  с UDP  у провайдера  уникальных  % рабочих"]
     for name, r in sorted(rows.items(), key=lambda kv: (-kv[1].fast, -kv[1].working)):
-        lines.append(f"{name[:24]:24} {r.listed:5} {r.alive:7} {r.working:8} {r.fast:8} {r.udp:6} {r.unique_working:11} {r.working_pct:9.1f}")
+        lines.append(f"{name[:24]:24} {r.listed:5} {r.alive:7} {r.working:8} {r.fast:8} {r.udp:6} {r.isp:13}"
+                     f" {r.unique_working:11} {r.working_pct:9.1f}")
     return lines
 
 

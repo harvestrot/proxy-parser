@@ -5,7 +5,6 @@
     python main.py scrape                 — собрать прокси с proxyscrape.com в results/all_proxies.json
     python main.py check                  — проверить прокси из results/all_proxies.json, сохранить рабочие в results/working_proxies.json
     python main.py all                    — scrape + check одной командой
-    python main.py serve [--port 1080]    — поднять локальный SOCKS5-роутер (без прав администратора)
     python main.py vpn-config             — сгенерировать vpn/config.json для sing-box (системный VPN через TUN)
 """
 from __future__ import annotations
@@ -18,8 +17,7 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
-from proxyparser import (app_routing, scraper, checker, filters, pipeline, storage, local_router, singbox_config,
-                         singbox_manager)
+from proxyparser import app_routing, scraper, checker, filters, pipeline, storage, singbox_config, singbox_manager
 from proxyparser.reputation import Reputation  # noqa: E402
 
 log = logging.getLogger("proxyparser")
@@ -86,18 +84,6 @@ def cmd_all(args: argparse.Namespace) -> None:
     cmd_check(args)
 
 
-def cmd_serve(args: argparse.Namespace) -> None:
-    results = storage.load_working_proxies()
-    if not results:
-        log.error("Нет рабочих прокси в results/working_proxies.json — сначала запустите `all` (или `scrape` + `check`)")
-        sys.exit(1)
-    log.info("Запускаю локальный SOCKS5-роутер. Пропиши в браузере/приложении прокси SOCKS5 127.0.0.1:%d", args.port)
-    try:
-        asyncio.run(local_router.serve(results, host=args.host, port=args.port))
-    except KeyboardInterrupt:
-        log.info("Остановлено пользователем")
-
-
 def cmd_vpn_config(args: argparse.Namespace) -> None:
     results = storage.load_working_proxies()
     if not results:
@@ -132,11 +118,6 @@ def main() -> None:
     p_all.add_argument("--concurrency", type=int, default=checker.DEFAULT_CONCURRENCY)
     p_all.add_argument("--timeout", type=float, default=checker.DEFAULT_TIMEOUT_S)
     p_all.set_defaults(func=cmd_all)
-
-    p_serve = sub.add_parser("serve", help="локальный SOCKS5-роутер (без прав администратора)")
-    p_serve.add_argument("--host", default=local_router.DEFAULT_LISTEN_HOST)
-    p_serve.add_argument("--port", type=int, default=local_router.DEFAULT_LISTEN_PORT)
-    p_serve.set_defaults(func=cmd_serve)
 
     p_vpn = sub.add_parser("vpn-config", help="сгенерировать конфиг sing-box для системного VPN (TUN)")
     p_vpn.set_defaults(func=cmd_vpn_config)
