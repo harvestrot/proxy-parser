@@ -10,10 +10,10 @@ from proxyparser import checker, filters, source_stats  # noqa: E402
 from proxyparser.models import CheckResult, Proxy, ProxyType  # noqa: E402
 
 
-def R(addr, working, speed=None, udp=None, error=None, network=None):
+def R(addr, working, speed=None, error=None, network=None):
     host, port = addr.split(":")
     return CheckResult(Proxy(host, int(port), ProxyType.SOCKS5, network=network), working, speed_kbps=speed,
-                       udp_ms=udp, error=error)
+                       error=error)
 
 
 def main():
@@ -22,7 +22,7 @@ def main():
         "B": ["1.1.1.1:1", "5.5.5.5:5", "6.6.6.6:6"],
     }
     results = [
-        R("1.1.1.1:1", True, speed=500, udp=50, network="isp"),        # есть в обоих
+        R("1.1.1.1:1", True, speed=500, network="isp"),                # есть в обоих
         R("2.2.2.2:2", True, speed=100, network="hosting"),            # только A
         R("3.3.3.3:3", False, error=checker.PREFILTER_DEAD_REASON),
         R("4.4.4.4:4", False, error=filters.EXCLUDE_REASON),
@@ -32,10 +32,10 @@ def main():
     ]
     rows = source_stats.compute(members, results)
     a, b = rows["A"], rows["B"]
-    assert (a.listed, a.alive, a.working, a.fast, a.udp, a.unique_working) == (5, 2, 2, 1, 1, 1), a
-    assert (b.listed, b.alive, b.working, b.fast, b.udp, b.unique_working) == (3, 3, 2, 2, 1, 1), b
+    assert (a.listed, a.alive, a.working, a.fast, a.unique_working) == (5, 2, 2, 1, 1), a
+    assert (b.listed, b.alive, b.working, b.fast, b.unique_working) == (3, 3, 2, 2, 1), b
     assert (a.isp, b.isp) == (1, 2), (a.isp, b.isp)
-    print("OK: живые/рабочие/быстрые/UDP/у провайдера/уникальные считаются по каждому источнику")
+    print("OK: живые/рабочие/быстрые/у провайдера/уникальные считаются по каждому источнику")
 
     table = source_stats.format_table(rows)
     assert table[1].startswith("B"), table  # больше быстрых — выше

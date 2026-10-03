@@ -1,6 +1,6 @@
 {
-  "_help": "Источники прокси. kind: plain (текстовый список ip:port по ссылке) или proxyscrape. type: socks5 / socks4 / http (для plain, если в строках нет схемы). limit: сколько максимум брать за одно обновление. enabled: true/false. После правки просто нажми «Обновить список».",
-  "version": 2,
+  "_help": "Источники прокси. kind: plain (текстовый список ip:port по ссылке), proxyscrape или subscription (подписка с узлами VLESS/VMess/Trojan/Shadowsocks). type: socks5 / socks4 / http (для plain, если в строках нет схемы). limit: сколько максимум брать за одно обновление. enabled: true/false. После правки просто нажми «Обновить список».",
+  "version": 3,
   "sources": [
     {
       "name": "proxyscrape.com",
@@ -30,7 +30,7 @@
       "type": "socks5",
       "enabled": true,
       "limit": 2500,
-      "_note": "5165 / 1947 / 797 — второй по числу уникальных SOCKS5; был и ради UDP (звонки)",
+      "_note": "5165 / 1947 / 797 — второй по числу уникальных SOCKS5",
       "url": "https://raw.githubusercontent.com/dpangestuw/Free-Proxy/main/socks5_proxies.txt"
     },
     {
@@ -38,7 +38,7 @@
       "kind": "plain",
       "type": "socks5",
       "enabled": true,
-      "_note": "1937 / 972 / 245 — половина списка — ферма 69.174.54.x; ради UDP",
+      "_note": "1937 / 972 / 245 — половина списка — ферма 69.174.54.x",
       "url": "https://raw.githubusercontent.com/vmheaven/VMHeaven-Free-Proxy-Updated/main/socks5.txt"
     },
     {
@@ -62,7 +62,7 @@
       "kind": "plain",
       "type": "socks5",
       "enabled": true,
-      "_note": "906 / 146 / 20 — 80% списка — ферма, половина остальных в РФ; ради UDP",
+      "_note": "906 / 146 / 20 — 80% списка — ферма, половина остальных в РФ; маленький, часто перепроверяется",
       "url": "https://raw.githubusercontent.com/elliottophellia/proxylist/master/results/socks5/global/socks5_checked.txt"
     },
     {
@@ -104,6 +104,43 @@
       "enabled": true,
       "_note": "217 / 198 / 75 — вернулся: маленький, перепроверяется каждый час",
       "url": "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt"
+    },
+    {
+      "name": "zhuhaiuk узлы (GitHub)",
+      "kind": "subscription",
+      "enabled": true,
+      "limit": null,
+      "_note": "17 / 10 из 16 и 6 из 15 / 6 и 3 — маленькая, но лучшая; обновляется каждый час",
+      "url": "https://raw.githubusercontent.com/zhuhaiuk/free-nodes/main/nodes.txt"
+    },
+    {
+      "name": "F0rc3Run узлы (GitHub)",
+      "kind": "subscription",
+      "enabled": true,
+      "_note": "552 / 10 из 119 и 20 из 300 / 3 и 3 — «лучшие результаты» их проверки; 19 рабочих только у неё",
+      "url": "https://raw.githubusercontent.com/F0rc3Run/F0rc3Run/main/Best-Results/proxies.txt"
+    },
+    {
+      "name": "Epodonios узлы (GitHub)",
+      "kind": "subscription",
+      "enabled": true,
+      "_note": "7744 / 3 из 120 и 1 из 300 / 2 и 1 — огромная, берётся случайная выборка",
+      "url": "https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/All_Configs_Sub.txt"
+    },
+    {
+      "name": "Au1rxx узлы (GitHub)",
+      "kind": "subscription",
+      "enabled": false,
+      "_note": "2000 ссылок / 2 из 120 и 1 из 300 / 1 и 0 — выключена: почти все ссылки ведут на адреса Cloudflare с разными настройками, а узел у нас — адрес:порт (проверяется одна случайная ссылка)",
+      "url": "https://raw.githubusercontent.com/Au1rxx/free-vpn-subscriptions/main/output/protocol/vless/v2ray-base64-0001.txt"
+    },
+    {
+      "name": "awesome-vpn узлы (GitHub)",
+      "kind": "subscription",
+      "enabled": true,
+      "limit": null,
+      "_note": "40 / 1 из 40 и 1 из 36 / 1 и 1",
+      "url": "https://raw.githubusercontent.com/awesome-vpn/awesome-vpn/master/all"
     }
   ]
 }

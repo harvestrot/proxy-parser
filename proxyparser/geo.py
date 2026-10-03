@@ -18,7 +18,9 @@ HTTPS-прокси у провайдера Bredband2 — как раз таки�
 """
 from __future__ import annotations
 
+import ipaddress
 import logging
+import socket
 from dataclasses import dataclass
 from typing import Callable
 
@@ -99,11 +101,31 @@ def _default_post(url: str, payload: list) -> list:
     return resp.json()
 
 
-def lookup_ips(ips: list[str], post: Poster | None = None) -> dict[str, IpInfo]:
-    """{ip: IpInfo} для тех IP, что удалось определить."""
+def _resolve(host: str) -> str | None:
+    """IPv4 домена (у узлов VLESS и т.п. сервер часто указан доменом); None — не узнался."""
+    try:
+        return socket.getaddrinfo(host, None, family=socket.AF_INET, type=socket.SOCK_STREAM)[0][4][0]
+    except (OSError, IndexError):
+        return None
+
+
+def _is_ip(host: str) -> bool:
+    try:
+        ipaddress.IPv4Address(host)
+        return True
+    except ValueError:
+        return False
+
+
+def lookup_ips(ips: list[str], post: Poster | None = None,
+               resolve: Callable[[str], str | None] = _resolve) -> dict[str, IpInfo]:
+    """{адрес: IpInfo} для тех адресов, что удалось определить. Домены (ip-api
+    их в пакетном запросе не принимает) сначала превращаются в IPv4."""
     post = post or _default_post
-    unique = list(dict.fromkeys(ips))
-    out: dict[str, IpInfo] = {}
+    hosts = list(dict.fromkeys(ips))
+    ip_of = {h: (h if _is_ip(h) else resolve(h)) for h in hosts}
+    unique = list(dict.fromkeys(ip for ip in ip_of.values() if ip))
+    by_ip: dict[str, IpInfo] = {}
     batches = [unique[i:i + BATCH_SIZE] for i in range(0, len(unique), BATCH_SIZE)]
     if len(batches) > MAX_BATCHES:
         log.info("Страну и сеть нужно определить для %d IP — за раз успею %d, остальные в следующий раз",
@@ -117,7 +139,7 @@ def lookup_ips(ips: list[str], post: Poster | None = None) -> dict[str, IpInfo]:
             break
         for item in data or []:
             if isinstance(item, dict) and item.get("status") == "success" and item.get("query"):
-                out[item["query"]] = IpInfo(
+                by_ip[item["query"]] = IpInfo(
                     country_code=item.get("countryCode") or "", country=item.get("country") or "",
                     network=_network_of(item), asn=str(item.get("as") or "")[:60])
-    return out
+    return {h: by_ip[ip] for h, ip in ip_of.items() if ip in by_ip}

@@ -34,6 +34,19 @@ def main():
     assert "9.9.9.9" not in got
     print("OK: тип сети: провайдер / хостинг / мобильная / неизвестно — из того же запроса, что и страна")
 
+    asked = []
+
+    def post_ips(url, payload):
+        asked.append(list(payload))
+        return [{"status": "success", "query": ip, "countryCode": "NL", "country": "Netherlands",
+                 "hosting": True, "as": "AS1 Test"} for ip in payload]
+
+    got = geo.lookup_ips(["node.example.com", "5.5.5.5", "no.such.invalid"], post=post_ips,
+                         resolve={"node.example.com": "6.6.6.6"}.get)
+    assert asked == [["6.6.6.6", "5.5.5.5"]], asked  # ip-api домены не принимает — спрашиваем IP
+    assert set(got) == {"node.example.com", "5.5.5.5"} and got["node.example.com"].country_code == "NL"
+    print("OK: у узла-домена страна и сеть определяются по его IP; не узнанный домен пропускается")
+
     def broken_post(url, payload):
         raise OSError("нет сети")
 

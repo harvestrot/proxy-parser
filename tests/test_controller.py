@@ -148,16 +148,56 @@ def _test_fetch_vpn_status() -> None:
     srv = http.server.HTTPServer(("127.0.0.1", 0), H)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     addr = f"127.0.0.1:{srv.server_address[1]}"
-    text, level, dead = ctl_mod.fetch_vpn_status(addr)
+    text, level, dead, active = ctl_mod.fetch_vpn_status(addr)
     assert not dead and level == "ok" and "5.6.7.8:1080" in text and "310" in text and "1 из 3" in text, text
+    assert active == "5.6.7.8:1080", active  # для подсветки строки в таблице
     print("OK: статус VPN:", text)
 
     payload["proxies"]["proxy-1-5_6_7_8-1080"]["history"] = [{"delay": 0}]
     payload["proxies"]["proxy-2-9_9_9_9-80"]["history"] = [{"delay": 0}]
-    text, level, dead = ctl_mod.fetch_vpn_status(addr)
-    assert level == "warn", text
+    text, level, dead, active = ctl_mod.fetch_vpn_status(addr)
+    assert level == "warn" and active is None, text
     print("OK: все мертвы ->", text)
     srv.shutdown()
+
+
+def _test_singbox_journal() -> None:
+    """В журнал окна из лога sing-box — только запуск, предупреждения и ошибки;
+    ошибка соединения (дубль ошибки группы) и повтор той же за минуту — нет."""
+    seen: dict[str, float] = {}
+    j = lambda line, now=0.0: ctl_mod.singbox_journal_line(line, seen, now)  # noqa: E731
+    assert j("+0300 2026-10-02 18:12:08 INFO [3836679263 0ms] router: found process path: C:/x/chrome.exe") is None
+    assert j("+0300 2026-10-02 18:12:09 INFO [1 52ms] dns: exchanged A ya.ru. 300 IN A 5.255.255.242") is None
+    assert j("+0300 2026-10-02 23:09:19 INFO sing-box started (0.25s)") == "23:09:19  sing-box запущен"
+    err = "+0300 2026-10-02 23:21:48 ERROR [2466274156 5.0s] outbound/urltest[auto]: dial tcp 8.8.8.8:80: i/o timeout"
+    assert j(err, 10.0) == "23:21:48  sing-box ОШИБКА: outbound/urltest[auto]: dial tcp 8.8.8.8:80: i/o timeout"
+    assert j(err, 30.0) is None                      # та же ошибка через 20 с — не повторяем
+    assert j(err, 80.0) is not None                  # через минуту — снова
+    assert j("+0300 2026-10-02 23:21:48 ERROR [2 5.0s] connection: open connection to 1.2.3.4:443: x") is None
+    assert j("+0300 2026-10-02 23:21:50 WARN [3 0ms] inbound/tun: something odd") == \
+        "23:21:50  sing-box ВНИМАНИЕ: inbound/tun: something odd"
+    assert j("FATAL bad config") == "sing-box: FATAL bad config"  # не формат лога — как есть
+    print("OK: журнал sing-box в окне — только запуск, предупреждения и ошибки, без дублей")
+    assert ctl_mod._tag_to_address("proxy-u3-yyz-ca-01_blncvpn4u_cc-443") == "yyz-ca-01.blncvpn4u.cc:443"
+    assert ctl_mod._tag_to_address("proxy-p0-85_8_47_212-7080") == "85.8.47.212:7080"
+    print("OK: тег sing-box -> адрес, и у узлов-доменов с дефисами")
+
+
+def _test_ban(ctl) -> None:
+    """«Исключить» в таблице: прокси пропадает из списка, помечается в
+    репутации и больше не проверяется; сохраняется на диск."""
+    a = CheckResult(Proxy("7.7.7.1", 1080, ProxyType.SOCKS5), True, latency_ms=100, speed_kbps=900)
+    b = CheckResult(Proxy("7.7.7.2", 3128, ProxyType.HTTPS), True, latency_ms=120, speed_kbps=800)
+    ctl.results = [a, b]
+    ctl.ban_proxy("7.7.7.1:1080")
+    events = _drain(ctl, lambda e: e[0] == "results")
+    assert [r.proxy.address for r in events[-1][1]] == ["7.7.7.2:3128"], events[-1]
+    assert ctl.rep.is_banned(a.proxy) and ctl.rep.should_skip(a.proxy) == "исключён вручную"
+    assert a.proxy not in ctl.rep.proven()
+    time.sleep(0.5)  # файлы пишутся в сетевом потоке следом за событием
+    assert reputation.Reputation.load().is_banned(a.proxy)
+    assert [r.proxy.address for r in storage.load_working_proxies()] == ["7.7.7.2:3128"]
+    print("OK: «Исключить» — прокси убран из списка, больше не проверяется, сохранено на диск")
 
 
 def _test_pin_failover(ctl) -> None:
@@ -201,15 +241,16 @@ def _test_pin_failover(ctl) -> None:
         assert puts == [], "одна неудачная проверка — ещё рано"
         tick()
         assert puts == [("/proxies/pinned", "auto")], puts
-        text, _, _ = ctl_mod.fetch_vpn_status()
-        assert "не отвечает" in text, text
+        text, _, _, active = ctl_mod.fetch_vpn_status()
+        assert "не отвечает" in text and active == "1.1.1.1:1080", (text, active)
         print("OK: закреплённый умер — после двух проверок подряд временно автовыбор:", text)
 
         state["proxies"][pin_tag]["history"] = [{"delay": 90}]
         tick()
         assert puts[-1] == ("/proxies/pinned", pin_tag), puts
-        text, level, _ = ctl_mod.fetch_vpn_status()
+        text, level, _, active = ctl_mod.fetch_vpn_status()
         assert "закреплённый" in text and "90 мс" in text and level == "ok", text
+        assert active == ctl_mod._tag_to_address(pin_tag), active
         print("OK: закреплённый ожил — возвращаемся на него:", text)
 
         puts.clear()
@@ -403,6 +444,7 @@ def main() -> None:
 
     _test_pin_failover(ctl)
     _test_auto_refresh_and_startup(ctl)
+    _test_ban(ctl)
 
     # 3) неожиданное падение sing-box -> ошибка в GUI
     crash_exe = _fake_singbox("sing-box-crash", "FATAL bad config", 1)
@@ -416,6 +458,7 @@ def main() -> None:
 
     ctl.shutdown()
     _test_fetch_vpn_status()
+    _test_singbox_journal()
     print("\nВсе тесты controller.py прошли.")
     os._exit(0)
 

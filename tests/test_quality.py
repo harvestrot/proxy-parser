@@ -1,7 +1,7 @@
-"""Тесты quality.py: поддержка UDP у SOCKS5 (для звонков) и замер скорости.
+"""Тесты quality.py: замер реальной скорости через прокси.
 
-Всё локально: фейковый SOCKS5 с честной UDP-пересылкой (UDP ASSOCIATE),
-SOCKS5 без поддержки UDP, UDP-«DNS»-эхо и HTTP-сервер, отдающий файл.
+Всё локально: фейковый SOCKS5 и HTTP-серверы, отдающие файл быстро, медленно
+или «замирающие» после первых килобайт (как режет ТСПУ).
 """
 import asyncio
 import pathlib
@@ -15,42 +15,7 @@ from proxyparser import checker, quality  # noqa: E402
 from proxyparser.models import CheckResult, Proxy, ProxyType  # noqa: E402
 
 
-class UdpEcho(asyncio.DatagramProtocol):
-    def connection_made(self, transport):
-        self.transport = transport
-
-    def datagram_received(self, data, addr):
-        self.transport.sendto(data, addr)  # «DNS-ответ» с тем же ID
-
-
-class Relay(asyncio.DatagramProtocol):
-    """UDP-реле SOCKS5: пакеты клиента (с SOCKS-заголовком) -> цель, ответы -> клиенту.
-    drop_every=N — терять каждый N-й пакет клиента (плохой канал)."""
-
-    def __init__(self, drop_every: int | None = None):
-        self.drop_every = drop_every
-        self.count = 0
-
-    def connection_made(self, transport):
-        self.transport = transport
-        self.client = None
-
-    def datagram_received(self, data, addr):
-        if data[:3] == b"\x00\x00\x00":  # от клиента
-            self.count += 1
-            if self.drop_every and self.count % self.drop_every == 0:
-                return
-            self.client = addr
-            ip = socket.inet_ntoa(data[4:8])
-            port = struct.unpack(">H", data[8:10])[0]
-            self.target = (ip, port)
-            self.transport.sendto(data[10:], self.target)
-        elif self.client:  # ответ от цели
-            hdr = b"\x00\x00\x00\x01" + socket.inet_aton(addr[0]) + struct.pack(">H", addr[1])
-            self.transport.sendto(hdr + data, self.client)
-
-
-def socks5_server(udp_supported: bool, drop_every: int | None = None):
+def socks5_server():
     async def handler(reader, writer):
         await reader.readexactly(2)
         await reader.readexactly(1)
@@ -62,24 +27,6 @@ def socks5_server(udp_supported: bool, drop_every: int | None = None):
             n = (await reader.readexactly(1))[0]
             host = (await reader.readexactly(n)).decode()
         port = struct.unpack(">H", await reader.readexactly(2))[0]
-        cmd = head[1]
-        if cmd == 3:  # UDP ASSOCIATE
-            if not udp_supported:
-                writer.write(b"\x05\x07\x00\x01" + b"\x00" * 6)  # command not supported
-                await writer.drain()
-                writer.close()
-                return
-            loop = asyncio.get_running_loop()
-            transport, _ = await loop.create_datagram_endpoint(lambda: Relay(drop_every), local_addr=("127.0.0.1", 0))
-            relay_port = transport.get_extra_info("sockname")[1]
-            # как многие реальные серверы, сообщаем 0.0.0.0 — клиент должен подставить адрес прокси
-            writer.write(b"\x05\x00\x00\x01" + b"\x00\x00\x00\x00" + struct.pack(">H", relay_port))
-            await writer.drain()
-            try:
-                await reader.read()  # держим UDP-сессию, пока жив TCP
-            finally:
-                transport.close()
-            return
         writer.write(b"\x05\x00\x00\x01" + b"\x00" * 6)
         await writer.drain()
         tr, tw = await asyncio.open_connection(host, port)
@@ -150,30 +97,6 @@ def stalling_server(first: int):
     return handler
 
 
-async def test_resolve_cache():
-    """Адрес цели UDP ищется один раз на всех, неудача тоже запоминается."""
-    calls = []
-    real = quality._doh_lookup
-
-    def fake_doh(host, timeout=8.0):
-        calls.append(host)
-        return "203.0.113.7" if host == "stun.ok.test" else None
-
-    quality._doh_lookup = fake_doh
-    try:
-        ips = await asyncio.gather(*(quality._resolve_udp_target(("stun.ok.test", 3478)) for _ in range(20)))
-        assert set(ips) == {"203.0.113.7"} and calls == ["stun.ok.test"], (ips, calls)
-        assert await quality._resolve_udp_target(("stun.bad.invalid", 3478)) is None
-        assert await quality._resolve_udp_target(("stun.bad.invalid", 3478)) is None
-        assert calls.count("stun.bad.invalid") == 1, calls
-    finally:
-        quality._doh_lookup = real
-        for h in ("stun.ok.test", "stun.bad.invalid"):
-            quality._resolved.pop(h, None)
-            quality._failed_at.pop(h, None)
-    print("OK: адрес цели UDP ищется один раз на все проверки; неудача запоминается (без 8 с ожидания у каждой)")
-
-
 async def test_speed_spread_by_subnet():
     """Замер скорости не должен целиком уйти одной «ферме» с малой задержкой."""
     farm = [CheckResult(Proxy("45.74.31.%d" % (i % 10), 1000 + i, ProxyType.SOCKS5), True, latency_ms=50 + i)
@@ -199,55 +122,21 @@ async def test_speed_spread_by_subnet():
 
 
 async def main():
-    await test_resolve_cache()
     await test_speed_spread_by_subnet()
-    loop = asyncio.get_running_loop()
-    echo_tr, _ = await loop.create_datagram_endpoint(UdpEcho, local_addr=("127.0.0.1", 0))
-    echo_port = echo_tr.get_extra_info("sockname")[1]
 
-    udp_srv = await asyncio.start_server(socks5_server(True), "127.0.0.1", 0)
-    no_udp_srv = await asyncio.start_server(socks5_server(False), "127.0.0.1", 0)
-    p_udp = Proxy("127.0.0.1", udp_srv.sockets[0].getsockname()[1], ProxyType.SOCKS5)
-    p_no_udp = Proxy("127.0.0.1", no_udp_srv.sockets[0].getsockname()[1], ProxyType.SOCKS5)
-
-    ms = await quality.check_udp(p_udp, timeout=2, target=("127.0.0.1", echo_port))
-    assert ms is not None, "UDP через честный SOCKS5 должен пройти"
-    print(f"OK: UDP через SOCKS5 с UDP ASSOCIATE проходит ({ms} мс), адрес 0.0.0.0 корректно подменён")
-
-    assert await quality.check_udp(p_no_udp, timeout=2, target=("127.0.0.1", echo_port)) is None
-    print("OK: SOCKS5 без поддержки UDP распознан")
-
-    assert await quality.check_udp(Proxy("127.0.0.1", 1, ProxyType.HTTPS), timeout=1) is None
-    print("OK: HTTP/SOCKS4 не проверяются на UDP (не умеют его в принципе)")
-
-    # быстрая проверка: прокси, теряющий каждый 2-й пакет, не проходит (нужно 4 из 5)
-    lossy_srv = await asyncio.start_server(socks5_server(True, drop_every=2), "127.0.0.1", 0)
-    p_lossy = Proxy("127.0.0.1", lossy_srv.sockets[0].getsockname()[1], ProxyType.SOCKS5)
-    assert await quality.check_udp(p_lossy, timeout=2, target=("127.0.0.1", echo_port)) is None
-    print("OK: UDP-проверка — серия пакетов; прокси с большими потерями отбракован")
-    lossy_srv.close()
-
-    # роутер/VPN-клиент в режиме fake-IP отдаёт для домена фиктивный 198.18.x.x —
-    # такой адрес не годится (пакеты уйдут в пустоту у ВСЕХ прокси)
-    assert not quality._is_real_ip("198.18.0.43") and not quality._is_real_ip("192.168.1.1")
-    assert quality._is_real_ip("162.159.207.0") and quality._is_real_ip("74.125.250.129")
-    # одна цель молчит (прокси её режет) — засчитывается следующая
-    real_targets = quality.UDP_TEST_TARGETS
-    quality.UDP_TEST_TARGETS = (("127.0.0.1", 9), ("127.0.0.1", echo_port))
-    try:
-        assert await quality.check_udp(p_udp, timeout=2) is not None
-    finally:
-        quality.UDP_TEST_TARGETS = real_targets
-    print("OK: фиктивные адреса целей отсекаются; если одна цель молчит — проверяется следующая")
+    srv_a = await asyncio.start_server(socks5_server(), "127.0.0.1", 0)
+    srv_b = await asyncio.start_server(socks5_server(), "127.0.0.1", 0)
+    p_a = Proxy("127.0.0.1", srv_a.sockets[0].getsockname()[1], ProxyType.SOCKS5)
+    p_b = Proxy("127.0.0.1", srv_b.sockets[0].getsockname()[1], ProxyType.SOCKS5)
 
     big = await asyncio.start_server(file_server(1_500_000), "127.0.0.1", 0)
     small = await asyncio.start_server(file_server(10_000), "127.0.0.1", 0)
     t_big = quality.SpeedTarget("127.0.0.1", big.sockets[0].getsockname()[1], tls=False, path="/")
     t_small = quality.SpeedTarget("127.0.0.1", small.sockets[0].getsockname()[1], tls=False, path="/")
-    speed = await quality.measure_speed(p_udp, t_big, timeout=2, max_seconds=3)
+    speed = await quality.measure_speed(p_a, t_big, timeout=2, max_seconds=3)
     assert speed and speed > 100, speed
     print(f"OK: скорость через прокси замерена: {speed:.0f} КБ/с")
-    assert await quality.measure_speed(p_udp, t_small, timeout=2, max_seconds=2) is None
+    assert await quality.measure_speed(p_a, t_small, timeout=2, max_seconds=2) is None
     print("OK: слишком мало данных — замер не засчитывается")
 
     # прокси принимает TCP и сразу закрывает его посреди SOCKS5-рукопожатия:
@@ -257,7 +146,7 @@ async def main():
     hang = await asyncio.start_server(hang_up, "127.0.0.1", 0)
     p_hang = Proxy("127.0.0.1", hang.sockets[0].getsockname()[1], ProxyType.SOCKS5)
     assert await quality.measure_speed(p_hang, t_big, timeout=2, max_seconds=2) == quality.SPEED_FAILED
-    hang_results = [CheckResult(p_hang, True, latency_ms=10), CheckResult(p_udp, True, latency_ms=20)]
+    hang_results = [CheckResult(p_hang, True, latency_ms=10), CheckResult(p_a, True, latency_ms=20)]
     assert await checker.measure_top_speeds(hang_results, top=2, target=t_big) == 2
     assert hang_results[0].speed_kbps == 0 and hang_results[1].speed_kbps > 100
     print("OK: обрыв посреди рукопожатия — скорость 0 (в VPN не попадёт), остальные меряются")
@@ -267,7 +156,7 @@ async def main():
     # низкую скорость, а не «неизвестно» (раньше такие пролезали в VPN)
     slow = await asyncio.start_server(trickle_server(4096, 0.2), "127.0.0.1", 0)
     t_slow = quality.SpeedTarget("127.0.0.1", slow.sockets[0].getsockname()[1], tls=False, path="/")
-    s = await quality.measure_speed(p_udp, t_slow, timeout=2, max_seconds=1.5)
+    s = await quality.measure_speed(p_a, t_slow, timeout=2, max_seconds=1.5)
     assert s is not None and 0 < s < 60, s
     print(f"OK: медленный прокси получает реальную низкую скорость ({s:.0f} КБ/с), а не «неизвестно»")
     slow.close()
@@ -276,7 +165,7 @@ async def main():
     stall = await asyncio.start_server(stalling_server(20_000), "127.0.0.1", 0)
     t_stall = quality.SpeedTarget("127.0.0.1", stall.sockets[0].getsockname()[1], tls=False, path="/")
     started = asyncio.get_running_loop().time()
-    s = await quality.measure_speed(p_udp, t_stall, timeout=2, max_seconds=6, stall_s=0.5)
+    s = await quality.measure_speed(p_a, t_stall, timeout=2, max_seconds=6, stall_s=0.5)
     took = asyncio.get_running_loop().time() - started
     assert s is not None and 0 < s < quality.SPEED_MIN_BYTES / 1024, s
     assert took < 3, took
@@ -284,8 +173,8 @@ async def main():
     stall.close()
 
     results = [
-        CheckResult(p_udp, True, latency_ms=50),
-        CheckResult(p_no_udp, True, latency_ms=60),
+        CheckResult(p_a, True, latency_ms=50),
+        CheckResult(p_b, True, latency_ms=60),
         CheckResult(Proxy("127.0.0.1", 1, ProxyType.SOCKS5), True, latency_ms=900),
         CheckResult(Proxy("127.0.0.1", 2, ProxyType.SOCKS5), False),
     ]
@@ -293,19 +182,8 @@ async def main():
     assert n == 2 and results[0].speed_kbps and results[1].speed_kbps and results[2].speed_kbps is None
     print("OK: скорость меряется только у лучших по задержке")
 
-    # check_all заодно проверяет UDP у рабочих SOCKS5
-    target = await asyncio.start_server(file_server(0), "127.0.0.1", 0)  # для TCP-пробы
-    from proxyparser.checker import ProbeTarget
-    probe = (ProbeTarget("127.0.0.1", target.sockets[0].getsockname()[1], tls=False, path="/generate_204"),)
-    res = await checker.check_all([p_udp, p_no_udp], probes=probe, required_probes=(), timeout=2, udp_target=("127.0.0.1", echo_port))
-    by_port = {r.proxy.port: r for r in res}
-    assert by_port[p_udp.port].working and by_port[p_udp.port].udp
-    assert by_port[p_no_udp.port].working and not by_port[p_no_udp.port].udp
-    print("OK: check_all отмечает, какие рабочие SOCKS5 пропускают UDP")
-
-    for srv in (udp_srv, no_udp_srv, big, small, target):
+    for srv in (srv_a, srv_b, big, small):
         srv.close()
-    echo_tr.close()
     print("\nВсе тесты quality.py прошли.")
 
 

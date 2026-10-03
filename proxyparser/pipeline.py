@@ -5,7 +5,7 @@
       -> лишние порты/адреса «ферм» (не больше 2 с IP и 6 с подсети /24)
       -> страна из источника / кеша; прокси из РФ отсеиваются
       -> быстрый отсев: открыт ли порт (за секунды убирает 80–90%)
-      -> полная проверка: HTTPS через прокси + сертификаты + UDP
+      -> полная проверка: HTTPS через прокси + сертификаты
       -> страна и тип сети по IP (ip-api) для рабочих; РФ исключается
       -> замер реальной скорости у рабочих
       -> обновление репутации
@@ -37,7 +37,6 @@ class PipelineStats:
     prefilter_dead: int = 0
     full_checked: int = 0
     working: int = 0
-    udp: int = 0
     speed_measured: int = 0
     notes: list[str] = field(default_factory=list)
 
@@ -155,7 +154,6 @@ async def run(
     results += full
     working = [r for r in full if r.working]
     stats.working = len(working)
-    stats.udp = sum(1 for r in working if r.udp)
 
     # 7. скорость у рабочих
     if working:

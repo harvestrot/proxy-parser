@@ -109,8 +109,7 @@ async def main():
         timeout=2,
         on_stage=lambda name, d, t: stages.append(name),
         lookup_ips=fake_lookup,
-        check_kwargs={"probes": (checker.ProbeTarget("127.0.0.1", t_port, False),), "required_probes": (),
-                      "udp_target": ("127.0.0.1", 9)},
+        check_kwargs={"probes": (checker.ProbeTarget("127.0.0.1", t_port, False),), "required_probes": ()},
         speed_kwargs={"target": quality.SpeedTarget("127.0.0.1", t_port, tls=False, path="/big")},
         prefilter_kwargs={"timeout": 1},
     )
@@ -146,8 +145,7 @@ async def main():
     good2 = Proxy("127.0.0.1", ports[0], ProxyType.SOCKS5, country_code="DE", source="src")
     results, _ = await pipeline.run(
         [good2], rep, timeout=2, lookup_ips=fake_lookup,
-        check_kwargs={"probes": (checker.ProbeTarget("127.0.0.1", t_port, False),), "required_probes": (),
-                      "udp_target": ("127.0.0.1", 9)},
+        check_kwargs={"probes": (checker.ProbeTarget("127.0.0.1", t_port, False),), "required_probes": ()},
         speed_kwargs={"target": quality.SpeedTarget("127.0.0.1", t_port, tls=False, path="/big")},
         prefilter_kwargs={"timeout": 1})
     again = next(r for r in results if r.proxy.port == ports[0] and r.proxy.host == "127.0.0.1")
@@ -174,8 +172,7 @@ async def main():
     rep3.update([CheckResult(old_good, True, latency_ms=10)])
     results, st = await pipeline.run(
         [farm_good] + farm_dead + [old_good], rep3, timeout=2, lookup_ips=fake_lookup,
-        check_kwargs={"probes": (checker.ProbeTarget("127.0.0.1", t_port, False),), "required_probes": (),
-                      "udp_target": ("127.0.0.1", 9)},
+        check_kwargs={"probes": (checker.ProbeTarget("127.0.0.1", t_port, False),), "required_probes": ()},
         speed_kwargs={"target": quality.SpeedTarget("127.0.0.1", t_port, tls=False, path="/big")},
         prefilter_kwargs={"timeout": 1})
     checked = {r.proxy.port for r in results}

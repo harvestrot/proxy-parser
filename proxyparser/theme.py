@@ -34,6 +34,8 @@ GREEN = "#34d399"
 AMBER = "#fbbf24"
 RED = "#f87171"
 PIN_BG, PIN_FG = "#2e2814", "#fcd34d"
+ACTIVE_BG, ACTIVE_FG = "#0f2a20", "#6ee7b7"  # строка прокси, через который сейчас идёт VPN
+ZEBRA = "#171b25"                          # чередование строк таблицы
 
 FONT = ("Segoe UI", 10)
 FONT_SMALL = ("Segoe UI", 9)
@@ -127,7 +129,7 @@ def apply(root: tk.Tk) -> None:
               background=[("active", SURFACE)], foreground=[("disabled", FAINT)])
 
     # таблица
-    s.configure("Treeview", background=SURFACE, fieldbackground=SURFACE, foreground=TEXT, rowheight=28,
+    s.configure("Treeview", background=SURFACE, fieldbackground=SURFACE, foreground=TEXT, rowheight=30,
                 borderwidth=0, relief="flat", **flat)
     s.map("Treeview", background=[("selected", ACCENT_DIM)], foreground=[("selected", "#ffffff")])
     s.configure("Treeview.Heading", background=RAISED, foreground=MUTED, font=FONT_CAPTION, relief="flat",

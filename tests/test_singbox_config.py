@@ -85,30 +85,18 @@ def test_group_only_speed_proven_when_enough():
     print("OK: хватает прокси с доказанной скоростью — в группе только они (sing-box не выберет «быстрый по пингу, но медленный»)")
 
 
-def test_udp_group_and_discord_fallback():
+def test_discord_voice_direct():
     base = [r("1.0.0.1", ProxyType.SOCKS5, 400), r("1.0.0.2", ProxyType.SOCKS5, 500), r("1.0.0.3", ProxyType.SOCKS5, 600)]
     config, meta = build_config(base)
     rules = config["route"]["rules"]
     discord = [x for x in rules if "process_name" in x]
     assert discord and discord[0]["outbound"] == "direct" and discord[0]["network"] == "udp"
-    assert "Discord.exe" in discord[0]["process_name"] and meta["udp_count"] == 0
-    print("OK: прокси с UDP нет — голос Discord идёт напрямую")
-
-    udp_proxy = CheckResult(Proxy("9.9.9.9", 1080, ProxyType.SOCKS5), True, latency_ms=3000, udp_ms=120)  # медленный по TCP, но с UDP
-    lossy = CheckResult(Proxy("9.9.8.9", 8443, ProxyType.SOCKS5), True, latency_ms=500, udp_ms=90, speed_kbps=2.5)
-    with_udp = base + [CheckResult(Proxy("1.0.0.1", 1080, ProxyType.SOCKS5), True, latency_ms=400, udp_ms=80),
-                       udp_proxy, lossy]
-    config, meta = build_config(with_udp)
-    groups = {o["tag"]: o for o in config["outbounds"] if o["type"] == "urltest"}
-    assert "auto-udp" in groups and len(groups["auto-udp"]["outbounds"]) == 2
-    assert {"network": "udp", "outbound": "auto-udp"} in config["route"]["rules"]
-    assert not any("process_name" in x for x in config["route"]["rules"])
-    all_tags = {o["tag"] for o in config["outbounds"]}
-    assert set(groups["auto-udp"]["outbounds"]) <= all_tags
+    assert "Discord.exe" in discord[0]["process_name"]
+    assert {"network": "udp", "port": 443, "action": "reject"} in rules  # QUIC — сразу отказ
+    assert not any(o["tag"] == "auto-udp" for o in config["outbounds"])
     assert all(o.get("connect_timeout") == "5s" for o in config["outbounds"] if o["type"] in ("socks", "http"))
-    assert meta["udp_count"] == 2
-    print("OK: есть прокси с UDP — весь UDP (звонки) идёт через отдельную группу; почти «мёртвый» "
-          "по скорости (2,5 КБ/с) в неё не берётся; таймаут подключения 5 с")
+    assert "Голос Discord — напрямую" in meta["comment_ru"]
+    print("OK: UDP через бесплатные прокси не идёт — голос Discord напрямую, QUIC отклоняется; таймаут подключения 5 с")
 
 
 def test_reliability_and_geo_in_ranking():
@@ -139,6 +127,62 @@ def test_isp_network_ahead_of_hosting():
     hosts = [c.proxy.host for c in chosen]
     assert hosts == ["4.0.3.1", "4.0.1.1", "4.0.2.1", "4.0.0.1"], hosts
     print("OK: при близкой скорости сеть провайдера впереди хостинга; намного более быстрый хостинг — первый")
+
+
+def test_ranked_for_table():
+    from proxyparser.singbox_config import ranked
+
+    def res(host, speed, ok=0, checks=0, working=True):
+        return CheckResult(Proxy(host, 1080, ProxyType.SOCKS5), working, latency_ms=300, speed_kbps=speed,
+                           rep_ok=ok, rep_checks=checks)
+    results = [res("5.0.0.1", 900), res("5.0.1.1", 60), res("5.0.2.1", 7000, ok=1, checks=5),
+               res("5.0.3.1", 4000), res("5.0.4.1", 9000, working=False)]
+    assert [r.proxy.host for r in ranked(results)] == ["5.0.3.1", "5.0.0.1", "5.0.2.1", "5.0.1.1"]
+    print("OK: таблица — по рейтингу VPN: быстрые сверху, нестабильные и медленные — внизу, нерабочих нет")
+
+
+def test_nodes_in_vpn():
+    from proxyparser import app_routing as ar, nodes
+    uuid = "11111111-2222-3333-4444-555555555555"
+    links = [f"vless://{uuid}@a.3dns.vip:443?security=tls&type=ws&path=%2F",
+             f"vless://{uuid}@b.3dns.vip:443?security=tls&type=ws&path=%2F",
+             f"vless://{uuid}@c.3dns.vip:443?security=tls&type=ws&path=%2F",   # третий того же провайдера
+             f"vless://{uuid}@7.7.7.7:443?security=reality&sni=x.com&pbk=key&sid=ab",
+             "trojan://pw@tr.example.org:443?sni=tr.example.org"]
+    node_results = [CheckResult(nodes.parse_link(link), True, latency_ms=300 + i, speed_kbps=3000 - i * 100)
+                    for i, link in enumerate(links)]
+    plain = [CheckResult(Proxy("2.2.2.2", 1080, ProxyType.SOCKS5), True, latency_ms=200, speed_kbps=900)]
+    cfg, meta = build_config(node_results + plain)
+    obs = {o["tag"]: o for o in cfg["outbounds"]}
+    vless = [o for o in obs.values() if o["type"] == "vless"]
+    assert vless and all(o["uuid"] == uuid and o["connect_timeout"] == "5s" for o in vless)
+    by_server = {o["server"]: o for o in obs.values() if "server" in o}
+    assert by_server["a.3dns.vip"]["domain_resolver"] == {"server": "direct-dns", "strategy": "ipv4_only"}
+    assert "domain_resolver" not in by_server["7.7.7.7"]  # у IP искать нечего
+    assert "c.3dns.vip" not in by_server, "не больше 2 узлов одного провайдера (*.3dns.vip)"
+    assert [s["tag"] for s in cfg["dns"]["servers"]] == ["remote-dns", "direct-dns"]
+    assert cfg["route"]["default_domain_resolver"] == "remote-dns"
+    print("OK: узлы — outbound VLESS/Trojan из ссылок; адрес узла-домена — прямым DoH; "
+          "не больше 2 узлов одного провайдера")
+
+    udp = obs["auto-udp"]
+    assert udp["type"] == "urltest" and set(udp["outbounds"]) <= set(obs)
+    assert {obs[t]["type"] for t in udp["outbounds"]} <= {"vless", "trojan"}, "в UDP-группе только узлы"
+    rules = cfg["route"]["rules"]
+    assert {"network": "udp", "outbound": "auto-udp"} in rules
+    assert not any(r.get("process_name") == DISCORD and r.get("outbound") == "direct" for r in rules)
+    assert meta["udp_count"] == len(udp["outbounds"]) and "UDP (звонки, игры) — через" in meta["comment_ru"]
+    print(f"OK: есть узлы — UDP (голос Discord, игры) через группу из {meta['udp_count']} узлов, QUIC по-прежнему отклоняется")
+
+    apps = [ar.app_for_exe("Discord.exe")]
+    cfg, _ = build_config(node_results, routing=ar.RoutingSettings(ar.MODE_ONLY, apps))
+    names = ["Discord.exe", "discord.exe"]
+    assert {"process_name": names, "network": "udp", "outbound": "auto-udp"} in cfg["route"]["rules"]
+    assert [s["tag"] for s in cfg["dns"]["servers"]] == ["direct-dns"]
+    print("OK: «только выбранные» — их UDP тоже через узлы")
+
+
+DISCORD = ["Discord.exe", "DiscordPTB.exe", "DiscordCanary.exe"]
 
 
 def test_bypass_rule_for_own_process():
@@ -175,17 +219,14 @@ def test_latency_matters_and_fast_https_not_lost():
         CheckResult(Proxy("4.0.2.1", 1080, S5), True, latency_ms=1200, speed_kbps=1000),
         CheckResult(Proxy("4.0.3.1", 8080, H), True, latency_ms=400, speed_kbps=1800),     # лучший — HTTPS
         CheckResult(Proxy("4.0.4.1", 1080, S5), True, latency_ms=300, speed_kbps=None),
-        CheckResult(Proxy("4.0.5.1", 1080, S5), True, latency_ms=7000, speed_kbps=50, udp_ms=90),
-        CheckResult(Proxy("4.0.6.1", 1080, S5), True, latency_ms=900, speed_kbps=50, udp_ms=200),
+        CheckResult(Proxy("4.0.5.1", 1080, S5), True, latency_ms=7000, speed_kbps=50),
+        CheckResult(Proxy("4.0.6.1", 1080, S5), True, latency_ms=900, speed_kbps=50),
     ]
     chosen, used = pick_proxies(results)
     hosts = [c.proxy.host for c in chosen]
     assert "4.0.0.1" not in hosts, "отклик 6 с — в группу не берём, какая бы ни была скорость"
     assert set(hosts) == {"4.0.1.1", "4.0.2.1", "4.0.3.1"} and used == [S5, H], (hosts, used)
     print("OK: прокси с откликом в секунды не попадают в группу; быстрый HTTPS не теряется из-за типа")
-    from proxyparser.singbox_config import pick_udp_proxies
-    assert [r.proxy.host for r in pick_udp_proxies(results)] == ["4.0.6.1"]
-    print("OK: для звонков не берём прокси, до которых рукопожатие дольше ~4 с")
 
 
 def test_few_good_filled_only_to_minimum():
@@ -259,7 +300,7 @@ def test_unstable_go_last():
 def test_app_routing_modes():
     from proxyparser import app_routing as ar
     results = [r("1.0.0.1", ProxyType.SOCKS5, 400), r("1.0.0.2", ProxyType.SOCKS5, 500),
-               CheckResult(Proxy("1.0.0.3", 1080, ProxyType.SOCKS5), True, latency_ms=600, udp_ms=90)]
+               r("1.0.0.3", ProxyType.SOCKS5, 600)]
     apps = [ar.app_for_exe("chrome.exe"), ar.app_for_exe("Discord.exe")]
 
     def rules_of(cfg):
@@ -276,7 +317,6 @@ def test_app_routing_modes():
     assert cfg["route"]["final"] == "direct"
     assert rules_of(cfg) == [
         {"process_name": names, "network": "udp", "port": 443, "action": "reject"},
-        {"process_name": names, "network": "udp", "outbound": "auto-udp"},
         {"process_name": names, "network": "tcp", "outbound": "auto"},
     ], rules_of(cfg)
     assert cfg["dns"]["final"] == "direct-dns" and "detour" not in cfg["dns"]["servers"][0]
@@ -356,9 +396,11 @@ if __name__ == "__main__":
     test_config_shape()
     test_speed_ranking_and_slow_drop()
     test_group_only_speed_proven_when_enough()
-    test_udp_group_and_discord_fallback()
+    test_discord_voice_direct()
     test_reliability_and_geo_in_ranking()
     test_isp_network_ahead_of_hosting()
+    test_ranked_for_table()
+    test_nodes_in_vpn()
     test_bypass_rule_for_own_process()
     test_subnet_diversity()
     test_latency_matters_and_fast_https_not_lost()

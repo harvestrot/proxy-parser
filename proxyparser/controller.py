@@ -12,6 +12,7 @@
     ("busy", bool)                      — идёт сбор/проверка
     ("vpn", "off" | "connecting" | "on")
     ("vpn_info", str, "ok" | "wait" | "warn")  — через какой прокси идём, сколько живых
+    ("vpn_active", str | None, list[str])  — адрес прокси, через который идёт трафик, и вся группа VPN
     ("error", str)
     ("ask", str, holder)  — вопрос Да/Нет/Отмена; GUI кладёт ответ в holder["answer"] и делает holder["event"].set()
 """
@@ -23,6 +24,7 @@ import dataclasses
 import json
 import logging
 import queue
+import re
 import threading
 import time
 import urllib.parse
@@ -67,6 +69,7 @@ class AppController:
         self._pending_asks: list[dict] = []
         self._last_retest = 0.0
         self._singbox_log = None
+        self._singbox_seen: dict[str, float] = {}  # недавние ошибки sing-box — не повторять в журнале
         self.rep = Reputation.load()
         self.autoheal = True            # автоподбор замены, когда прокси в VPN умирают
         self.routing = app_routing.load()  # какие приложения идут через прокси
@@ -101,6 +104,11 @@ class AppController:
     def vpn_state(self) -> str:
         return self._vpn_state
 
+    @property
+    def last_refresh_at(self) -> float:
+        """Когда список обновлялся в последний раз (0 — ни разу)."""
+        return self._last_refresh_at
+
     def _set_vpn(self, state: str) -> None:
         prev = self._vpn_state
         self._vpn_state = state
@@ -111,6 +119,7 @@ class AppController:
             self._vpn_info_future.cancel()
             self._vpn_info_future = None
             self._emit("vpn_info", "", "ok")
+            self._emit("vpn_active", None, [])
 
     # ---------- сбор и проверка ----------
 
@@ -205,9 +214,9 @@ class AppController:
             log.info(
                 "Кандидатов: %d из источников + %d проверенных ранее; пропущено по репутации: %d; "
                 "лишних портов «ферм»: %d; из РФ: %d; мёртвых по быстрому отсеву: %d; "
-                "полную проверку прошли %d из %d (с UDP: %d)",
+                "полную проверку прошли %d из %d",
                 ps.from_sources, ps.from_reputation, ps.skipped_by_reputation, ps.skipped_farms, ps.excluded_country,
-                ps.prefilter_dead, ps.working, ps.full_checked, ps.udp,
+                ps.prefilter_dead, ps.working, ps.full_checked,
             )
             fast = sorted((r.speed_kbps for r in results if r.working and r.speed_kbps), reverse=True)
             if fast:
@@ -229,6 +238,8 @@ class AppController:
                              ", ".join(f"{k}: {v.get('fast', 0)}" for k, v in
                                        sorted(totals.items(), key=lambda kv: -kv[1].get("fast", 0))))
 
+            # исключённый вручную, пока шла проверка, в список не возвращается
+            results = [r for r in results if not self.rep.is_banned(r.proxy)]
             storage.save_results(results)
             self.results = storage.sorted_by_priority(results)
             self._last_refresh_at = time.time()
@@ -267,7 +278,9 @@ class AppController:
     def _scrape_any_way(self):
         """Источники открываем напрямую; если какой-то не открылся, а
         сохранённые прокси есть — пробуем его через них."""
-        fallback = netpath.ProxyFetcher([r.proxy for r in self.results]) if self.results else None
+        # узлы — только через мост sing-box; для загрузки списков хватает обычных прокси
+        plain = [r.proxy for r in self.results if not r.proxy.type.is_node]
+        fallback = netpath.ProxyFetcher(plain) if plain else None
         proxies, stats = scraper.scrape(scraper.direct_fetcher(timeout_s=15), fallback_fetch=fallback)
         if not proxies:
             failed = "; ".join(f"{k}: {v}" for k, v in stats.sources_failed.items())
@@ -377,11 +390,9 @@ class AppController:
                 self._singbox_log.write(line + "\n")
             except (OSError, ValueError):
                 pass
-        # в окно не выводим шумные строки про каждое соединение — только важное
-        if " INFO " in line and ("connection" in line or "inbound/" in line or "outbound/" in line):
-            pass
-        else:
-            self._emit("log", f"[sing-box] {line}")
+        journal = singbox_journal_line(line, self._singbox_seen)
+        if journal:
+            self._emit("log", journal)
         if self._vpn_state == "connecting" and "started" in line.lower():
             self._set_vpn("on")
             self._emit("status", "VPN подключён")
@@ -435,6 +446,29 @@ class AppController:
             log.info("Закреплён прокси %s", address)
         self.update_settings(s)
 
+    def ban_proxy(self, address: str) -> None:
+        """Исключить прокси вручную (через него не открывается сайт, браузер
+        ругается на сертификат…): больше не проверяется и не попадает в VPN.
+        Если он сейчас в VPN — VPN перезапускается без него."""
+        self._submit(self._ban(address))
+
+    async def _ban(self, address: str) -> None:
+        # в сетевом потоке: репутацию в это время может обновлять проверка
+        r = next((r for r in self.results if r.proxy.address == address), None)
+        if r is None:
+            return
+        self.rep.ban(r.proxy)
+        self.results = [x for x in self.results if x is not r]
+        log.info("Прокси %s исключён: больше не проверяется и не попадёт в VPN", address)
+        self._emit("results", self.results)
+        await asyncio.to_thread(self.rep.save)
+        await asyncio.to_thread(storage.save_results, self.results)
+        if self.settings.pinned_address == address:
+            self.pin_proxy(None)  # открепление само перезапустит VPN
+        elif address in self._current_group and self._singbox.running and self.results:
+            self._emit("status", "Перезапускаю VPN без исключённого прокси...")
+            await asyncio.to_thread(self._restart_vpn_safely)
+
     def _restart_vpn_safely(self) -> None:
         try:
             self._restart_vpn_blocking()
@@ -481,8 +515,9 @@ class AppController:
             try:
                 if self._pin_tag:
                     await self._pin_failover()
-                text, level, current_dead = await asyncio.to_thread(fetch_vpn_status)
+                text, level, current_dead, active = await asyncio.to_thread(fetch_vpn_status)
                 self._emit("vpn_info", text, level)
+                self._emit("vpn_active", active, list(self._current_group))
                 # sing-box сам перепроверяет прокси только по таймеру; если выбранный
                 # уже не отвечает, а другие живы — просим перепроверить сразу
                 if current_dead and time.monotonic() - self._last_retest > 20:
@@ -597,10 +632,12 @@ SINGBOX_LOG = singbox_manager.VPN_DIR / "sing-box.log"
 
 
 def _tag_to_address(tag: str) -> str:
-    # формат тега: proxy-<i>-<host_с_подчёркиваниями>-<port>
-    parts = tag.split("-")
-    if len(parts) >= 4 and parts[0] == "proxy":
-        return f"{parts[2].replace('_', '.')}:{parts[3]}"
+    # формат тега: proxy-<i>-<host_с_подчёркиваниями>-<port>; в домене узла
+    # бывают дефисы — поэтому номер отрезается слева, порт — справа
+    parts = tag.split("-", 2)
+    if len(parts) == 3 and parts[0] == "proxy" and "-" in parts[2]:
+        host, port = parts[2].rsplit("-", 1)
+        return f"{host.replace('_', '.')}:{port}"
     return tag
 
 
@@ -638,9 +675,10 @@ def fetch_group_health(api_addr: str | None = None) -> tuple[int, int, int] | No
     return alive, tested, len(members)
 
 
-def fetch_vpn_status(api_addr: str | None = None) -> tuple[str, str, bool]:
+def fetch_vpn_status(api_addr: str | None = None) -> tuple[str, str, bool, str | None]:
     """Спросить у sing-box (Clash API), какой прокси сейчас выбран и сколько
-    прокси в группе реально отвечают. Возвращает (текст, уровень)."""
+    прокси в группе реально отвечают. Возвращает (текст, уровень, выбранный
+    не отвечает, адрес прокси, через который идёт трафик)."""
     api_addr = api_addr or singbox_config.CLASH_API_ADDR
     with _api_opener().open(f"http://{api_addr}/proxies", timeout=3) as resp:
         data = json.load(resp)
@@ -658,12 +696,13 @@ def fetch_vpn_status(api_addr: str | None = None) -> tuple[str, str, bool]:
     alive = sum(1 for d in tested if d > 0)
 
     if not tested:
-        return f"Проверяю прокси... (0 из {total})", "wait", False
+        return f"Проверяю прокси... (0 из {total})", "wait", False, None
     if alive == 0:
         if len(tested) < total:
-            return f"Проверяю прокси... ({len(tested)} из {total}, пока ни один не ответил)", "wait", False
-        return f"Ни один из {total} прокси сейчас не отвечает — нажми «Обновить список»", "warn", False
+            return f"Проверяю прокси... ({len(tested)} из {total}, пока ни один не ответил)", "wait", False, None
+        return f"Ни один из {total} прокси сейчас не отвечает — нажми «Обновить список»", "warn", False, None
     now = group.get("now", "")
+    active = _tag_to_address(now) if now else None
     now_delay = delays.get(now)
     delay_txt = f"{now_delay} мс" if now_delay else "—"
     current_dead = not now_delay  # выбранный прокси не ответил на последней проверке
@@ -673,6 +712,7 @@ def fetch_vpn_status(api_addr: str | None = None) -> tuple[str, str, bool]:
     if selector:
         pin_tag = (selector.get("all") or [""])[0]
         if selector.get("now") == pin_tag:
+            active = _tag_to_address(pin_tag)
             pin_delay = last_delay(pin_tag)
             via = f"Через закреплённый {_tag_to_address(pin_tag)} ({f'{pin_delay} мс' if pin_delay else '—'})"
             current_dead, level = False, "ok" if pin_delay else "wait"
@@ -683,10 +723,39 @@ def fetch_vpn_status(api_addr: str | None = None) -> tuple[str, str, bool]:
     if udp_group:
         udp_members = udp_group.get("all", [])
         udp_alive = sum(1 for t in udp_members if (last_delay(t) or 0) > 0)
-        udp_txt = f" · звонки (UDP): через прокси, отвечают {udp_alive} из {len(udp_members)}"
+        udp_txt = f" · UDP (звонки): через узлы, отвечают {udp_alive} из {len(udp_members)}"
     else:
-        udp_txt = " · звонки Discord: напрямую"
-    return f"{via} · отвечают {alive} из {total}{udp_txt}", level, current_dead
+        udp_txt = " · голос Discord: напрямую"
+    return f"{via} · отвечают {alive} из {total}{udp_txt}", level, current_dead, active
+
+
+SINGBOX_REPEAT_S = 60  # одну и ту же ошибку sing-box показываем в журнале не чаще раза в минуту
+_SINGBOX_LINE = re.compile(r"^[+-]\d{4} \d{4}-\d\d-\d\d (\d\d:\d\d:\d\d) (\w+) (?:\[\d+ [^\]]*\] )?(.*)$")
+
+
+def singbox_journal_line(line: str, seen: dict[str, float], now: float | None = None) -> str | None:
+    """Строка лога sing-box для журнала в окне — или None, если она там не нужна.
+
+    sing-box пишет строку на каждое соединение и DNS-запрос (тысячи за час) —
+    в окно идут только запуск, предупреждения и ошибки. Ошибка соединения
+    пишется дважды (группой и самим соединением) — остаётся одна, и одна и та
+    же не чаще раза в минуту. Полный лог — в vpn/sing-box.log."""
+    m = _SINGBOX_LINE.match(line.strip())
+    if m is None:
+        return f"sing-box: {line.strip()}" if line.strip() else None  # не формат лога — например, паника
+    clock, level, text = m.groups()
+    if level in ("INFO", "DEBUG", "TRACE"):
+        return f"{clock}  sing-box запущен" if text.startswith("sing-box started") else None
+    if level == "ERROR" and text.startswith("connection: "):
+        return None
+    now = time.monotonic() if now is None else now
+    if now - seen.get(text, -SINGBOX_REPEAT_S) < SINGBOX_REPEAT_S:
+        return None
+    seen[text] = now
+    if len(seen) > 200:
+        seen.clear()
+    label = "ВНИМАНИЕ" if level == "WARN" else "ОШИБКА"
+    return f"{clock}  sing-box {label}: {text}"
 
 
 def _clash_select(group: str, name: str, api_addr: str | None = None) -> None:
