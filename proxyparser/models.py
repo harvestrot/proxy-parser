@@ -6,18 +6,30 @@ from enum import Enum
 
 
 class ProxyType(str, Enum):
-    """Тип прокси в порядке приоритета (меньше — приоритетнее)."""
+    """Тип прокси. Кроме обычных SOCKS/HTTP — «узлы» с шифрованием
+    (VLESS, VMess, Trojan, Shadowsocks: см. nodes.py)."""
 
     SOCKS5 = "SOCKS5"
     SOCKS4 = "SOCKS4"
     HTTPS = "HTTPS"
+    VLESS = "VLESS"
+    VMESS = "VMESS"
+    TROJAN = "TROJAN"
+    SS = "SS"
 
     @property
     def priority(self) -> int:
+        """Меньше — приоритетнее (при прочих равных)."""
         return _PRIORITY[self.value]
 
+    @property
+    def is_node(self) -> bool:
+        """Узел с шифрованием — проверяется через мост sing-box (bridge.py)."""
+        return self.value in _NODE_TYPES
 
-_PRIORITY = {"SOCKS5": 0, "SOCKS4": 1, "HTTPS": 2}
+
+_PRIORITY = {"SOCKS5": 0, "VLESS": 1, "TROJAN": 1, "VMESS": 1, "SS": 1, "SOCKS4": 2, "HTTPS": 3}
+_NODE_TYPES = {"VLESS", "VMESS", "TROJAN", "SS"}
 
 
 @dataclass
@@ -34,6 +46,7 @@ class Proxy:
     country_code: str | None = None  # ISO-код страны, например "DE"
     network: str | None = None  # тип сети: "isp" / "mobile" / "hosting" (geo.NET_*), None — неизвестно
     asn: str | None = None  # «AS29518 Bredband2 AB»
+    link: str | None = None  # у узлов: исходная ссылка vless://… — из неё собирается outbound sing-box
 
     @property
     def address(self) -> str:
@@ -62,7 +75,6 @@ class CheckResult:
     latency_ms: float | None = None
     error: str | None = None
     checked_at: float = 0.0
-    udp_ms: float | None = None      # задержка UDP через прокси; None — UDP не поддерживается/не проверялся
     speed_kbps: float | None = None  # реальная скорость скачивания, КБ/с (замеряется у лучших)
     rep_ok: int = 0                  # из репутации: сколько проверок прошёл за всё время...
     rep_checks: int = 0              # ...из скольких
@@ -71,10 +83,6 @@ class CheckResult:
     def reliability(self) -> float:
         return (self.rep_ok + 1) / (self.rep_checks + 2)
 
-    @property
-    def udp(self) -> bool:
-        return self.udp_ms is not None
-
     def to_dict(self) -> dict:
         return {
             **self.proxy.to_dict(),
@@ -82,7 +90,6 @@ class CheckResult:
             "latency_ms": self.latency_ms,
             "error": self.error,
             "checked_at": self.checked_at,
-            "udp_ms": self.udp_ms,
             "speed_kbps": self.speed_kbps,
             "rep_ok": self.rep_ok,
             "rep_checks": self.rep_checks,

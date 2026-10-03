@@ -63,9 +63,11 @@ def main():
         {"name": "D", "kind": "plain", "url": "http://d", "type": "vpn"},  # неизвестный тип
         {"name": "E", "kind": "proxyscrape", "enabled": False},
         {"name": "F", "kind": "proxyscrape"},
+        {"name": "G", "kind": "subscription", "url": "http://g", "limit": 10},  # узлы VLESS и т.п.
+        {"name": "H", "kind": "subscription"},                                # нет url — с ошибкой
     ]}), encoding="utf-8")
     sources = sources_config.load_sources(tmp)
-    assert list(sources) == ["A", "F"], list(sources)
+    assert list(sources) == ["A", "F", "G"], list(sources)
     print("OK: ошибочные и выключенные записи пропускаются, остальные работают")
 
     # Блокнот: «UTF-8 с BOM» и ANSI (cp1251) с русскими буквами в названии

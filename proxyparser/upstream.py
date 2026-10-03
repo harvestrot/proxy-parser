@@ -1,4 +1,5 @@
-"""Установка туннеля через внешний прокси (SOCKS5 / SOCKS4 / HTTP CONNECT).
+"""Установка туннеля через внешний прокси (SOCKS5 / SOCKS4 / HTTP CONNECT,
+а узлы VLESS/VMess/Trojan/SS — через их вход в мосте sing-box, bridge.py).
 
 Соединение не закрывается, а возвращается наружу: через него checker.py и
 quality.py шлют проверочные запросы, а netpath.py загружает источники, если
@@ -11,6 +12,7 @@ import ipaddress
 import socket
 import struct
 
+from . import bridge
 from .models import Proxy, ProxyType
 
 StreamPair = tuple[asyncio.StreamReader, asyncio.StreamWriter]
@@ -138,6 +140,16 @@ _DIALERS = {
 
 
 async def connect_via(proxy: Proxy, dst_host: str, dst_port: int, timeout: float) -> StreamPair:
+    if proxy.type.is_node:
+        # узел VLESS/VMess/Trojan/SS — через его вход SOCKS5 в мосте sing-box
+        port = bridge.local_port(proxy)
+        if port is None:
+            raise UpstreamUnreachable(f"{proxy.type.value}: мост к узлу не запущен")
+        try:
+            return await connect_via(Proxy("127.0.0.1", port, ProxyType.SOCKS5), dst_host, dst_port, timeout)
+        except UpstreamError as exc:
+            # ошибка — у локального входа моста, а значит sing-box не достучался до узла
+            raise UpstreamError(f"{proxy.type.value}: узел не соединил") from exc
     dialer = _DIALERS.get(proxy.type)
     if dialer is None:
         raise UpstreamError(f"неизвестный тип прокси {proxy.type}")

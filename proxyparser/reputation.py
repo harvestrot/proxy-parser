@@ -7,11 +7,12 @@
   пятую проверку подряд, куда ценнее «случайно живого сегодня»);
 * скорость и задержка — сглаженные средние по всем проверкам;
 * чёрный список — прокси, пойманные на подмене сертификата, больше не
-  проверяются никогда;
+  проверяются никогда; туда же попадают исключённые вручную (правый клик в
+  таблице — «Исключить»: например, через него не открывается сайт);
 * «отдых» — прокси, ни разу не работавшие и упавшие много раз подряд,
   сутки не проверяются (экономит время);
 * проверенные прокси перепроверяются, даже если пропали из источников;
-  быстрые (как и прокси с UDP) — после первой же удачной проверки и неделю:
+  быстрые — после первой же удачной проверки и неделю:
   их мало, а бесплатные списки то теряют, то снова находят один и тот же
   прокси;
 * страна и тип сети по IP кешируются, чтобы не спрашивать их повторно.
@@ -24,7 +25,7 @@ import json
 import logging
 import pathlib
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 
 from .models import CheckResult, Proxy, ProxyType
 from .paths import APP_DIR
@@ -39,7 +40,7 @@ COOLDOWN_AFTER_FAILS = 2          # столько провалов подряд
 COOLDOWN_SECONDS = 24 * 3600
 PROVEN_MIN_OK = 2                 # «проверенный» — прошёл хотя бы 2 проверки...
 PROVEN_MAX_AGE = 48 * 3600        # ...и работал не позже чем 48 ч назад
-RARE_PROVEN_MAX_AGE = 7 * 24 * 3600  # редкие (с UDP или быстрые): одной проверки хватает, помним неделю
+FAST_PROVEN_MAX_AGE = 7 * 24 * 3600  # быстрые — редкость: одной проверки хватает, помним неделю
 FAST_PROVEN_KBPS = 500            # «быстрый» — тот же порог, что и для группы VPN (singbox_config.GOOD_SPEED_KBPS)
 FORGET_AFTER = 7 * 24 * 3600      # не встречался неделю — забываем (кроме чёрного списка)
 FORGET_DEAD_AFTER = 3 * 24 * 3600 # ни разу не работавшие — забываем быстрее
@@ -61,9 +62,10 @@ class Entry:
     last_seen: float = 0.0
     latency_ms: float | None = None
     speed_kbps: float | None = None
-    udp_ok: int = 0
     mitm: bool = False
     skip_until: float = 0.0
+    banned: bool = False  # исключён вручную
+    link: str | None = None  # у узлов VLESS и т.п. — ссылка: без неё узел не перепроверить
 
     @property
     def reliability(self) -> float:
@@ -71,7 +73,7 @@ class Entry:
         return (self.ok + 1) / (self.checks + 2)
 
     def to_proxy(self) -> Proxy:
-        return Proxy(host=self.host, port=self.port, type=ProxyType(self.type), source=self.source)
+        return Proxy(host=self.host, port=self.port, type=ProxyType(self.type), source=self.source, link=self.link)
 
 
 def _ema(old: float | None, new: float | None) -> float | None:
@@ -108,9 +110,10 @@ class Reputation:
         except (OSError, ValueError) as exc:  # ValueError: битый JSON или обрезанная кодировка
             log.warning("reputation.json не читается (%s) — начинаю с чистой репутации", exc)
             return rep
+        known = {f.name for f in fields(Entry)}
         for key, raw in data.get("entries", {}).items():
             try:
-                rep.entries[key] = Entry(**raw)
+                rep.entries[key] = Entry(**{k: v for k, v in raw.items() if k in known})
             except TypeError:
                 continue
         for key, raw in data.get("dead", {}).items():
@@ -131,7 +134,7 @@ class Reputation:
         # компактно: ключ -> [провалов подряд, отдых до, когда видели].
         full, dead = {}, {}
         for k, e in self.entries.items():
-            if e.ok > 0 or e.mitm:
+            if e.ok > 0 or e.mitm or e.banned:
                 full[k] = asdict(e)
             else:
                 dead[k] = [e.fail_streak, round(e.skip_until), round(e.last_seen)]
@@ -157,6 +160,8 @@ class Reputation:
             return None
         if e.mitm:
             return "в чёрном списке: подменял сертификат"
+        if e.banned:
+            return "исключён вручную"
         if e.skip_until > (now or time.time()):
             return "на отдыхе: много раз подряд не работал"
         return None
@@ -165,12 +170,12 @@ class Reputation:
         now = now or time.time()
         out = []
         for e in self.entries.values():
-            if e.mitm or e.last_ok is None:
+            if e.mitm or e.banned or e.last_ok is None:
                 continue
-            if e.udp_ok or (e.speed_kbps or 0) >= FAST_PROVEN_KBPS:
-                # прокси с настоящим UDP (≈2% рабочих SOCKS5) и быстрые — редкость:
-                # хватает одной успешной проверки, и помним такой неделю, а не двое суток
-                if now - e.last_ok <= RARE_PROVEN_MAX_AGE:
+            if (e.speed_kbps or 0) >= FAST_PROVEN_KBPS:
+                # быстрые — редкость: хватает одной успешной проверки, и помним
+                # такой неделю, а не двое суток
+                if now - e.last_ok <= FAST_PROVEN_MAX_AGE:
                     out.append(e.to_proxy())
             elif e.ok >= PROVEN_MIN_OK and now - e.last_ok <= PROVEN_MAX_AGE:
                 out.append(e.to_proxy())
@@ -194,6 +199,18 @@ class Reputation:
             if network:
                 self.networks[ip] = [network, asn]
 
+    def ban(self, p: Proxy, now: float | None = None) -> None:
+        """Исключить прокси вручную: больше не проверяется и не попадает в VPN."""
+        key = _key(p)
+        e = self.entries.get(key) or Entry(host=p.host, port=p.port, type=p.type.value, source=p.source)
+        e.banned = True
+        e.last_seen = now or time.time()
+        self.entries[key] = e
+
+    def is_banned(self, p: Proxy) -> bool:
+        e = self.get(p)
+        return e is not None and e.banned
+
     def annotate(self, r: CheckResult) -> None:
         """Дописать в результат надёжность из истории (для таблицы и выбора)."""
         e = self.get(r.proxy)
@@ -211,6 +228,8 @@ class Reputation:
             e.last_seen = now
             if p.source and not e.source:
                 e.source = p.source
+            if p.link:
+                e.link = p.link  # подписка могла обновить ключ узла
             e.checks += 1
             if r.working:
                 e.ok += 1
@@ -219,7 +238,6 @@ class Reputation:
                 e.skip_until = 0.0
                 e.latency_ms = _ema(e.latency_ms, r.latency_ms)
                 e.speed_kbps = _ema(e.speed_kbps, r.speed_kbps)
-                e.udp_ok += 1 if r.udp else 0
             else:
                 e.fail_streak += 1
                 if r.error and MITM_MARKER in r.error:
@@ -232,7 +250,8 @@ class Reputation:
     def prune(self, now: float | None = None) -> int:
         now = now or time.time()
         stale = [k for k, e in self.entries.items()
-                 if not e.mitm and now - e.last_seen > (FORGET_AFTER if e.ok else FORGET_DEAD_AFTER)]
+                 if not e.mitm and not e.banned
+                 and now - e.last_seen > (FORGET_AFTER if e.ok else FORGET_DEAD_AFTER)]
         for k in stale:
             del self.entries[k]
         return len(stale)

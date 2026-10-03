@@ -22,8 +22,8 @@ import time
 from dataclasses import dataclass
 
 from .filters import EXCLUDE_REASON, is_excluded
-from . import quality
-from .models import CheckResult, Proxy, ProxyType
+from . import bridge, quality
+from .models import CheckResult, Proxy
 from .scraper import subnet24
 from .upstream import UpstreamError, UpstreamUnreachable, connect_via
 
@@ -191,11 +191,10 @@ async def check_all(
     probes: tuple[ProbeTarget, ...] = DEFAULT_PROBES,
     on_progress=None,
     required_probes: tuple[ProbeTarget, ...] = DEFAULT_REQUIRED_PROBES,
-    check_udp_support: bool = True,
-    udp_target: tuple[str, int] | None = None,  # None — штатные цели (quality.UDP_TEST_TARGETS)
 ) -> list[CheckResult]:
     """Проверить список прокси параллельно (с ограничением конкурентности).
-    У рабочих SOCKS5 заодно проверяется поддержка UDP (нужна для звонков)."""
+    Узлы VLESS/VMess/Trojan/SS — через мост sing-box (bridge.py), который
+    работает, пока идёт проверка."""
 
     sem = asyncio.Semaphore(concurrency)
     results: list[CheckResult] = []
@@ -213,8 +212,6 @@ async def check_all(
                 try:
                     res = await check_proxy(p, probes=probes, required_probes=required_probes,
                                             ip_probes=ip_probes, timeout=timeout)
-                    if res.working and check_udp_support and p.type == ProxyType.SOCKS5:
-                        res.udp_ms = await quality.check_udp(p, timeout=min(timeout, 5.0), target=udp_target)
                 except Exception as exc:  # noqa: BLE001 — сбой одного прокси не должен ронять всю проверку
                     log.debug("Проверка %s упала: %r", p.address, exc)
                     res = CheckResult(proxy=p, working=False, error=f"сбой проверки: {exc!r}"[:200],
@@ -224,7 +221,8 @@ async def check_all(
         if on_progress is not None:
             on_progress(done_count, total, res)
 
-    await asyncio.gather(*(_one(p) for p in proxies))
+    async with bridge.serve([p for p in proxies if not is_excluded(p)]):
+        await asyncio.gather(*(_one(p) for p in proxies))
     return results
 
 
@@ -283,7 +281,8 @@ async def measure_top_speeds(
         if on_progress is not None:
             on_progress(done, len(candidates), r)
 
-    await asyncio.gather(*(_one(r) for r in candidates))
+    async with bridge.serve([r.proxy for r in candidates]):
+        await asyncio.gather(*(_one(r) for r in candidates))
     return measured
 
 

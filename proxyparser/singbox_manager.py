@@ -65,8 +65,13 @@ def own_process_paths() -> list[str]:
     на Windows python.exe из venv — лишь «пускалка», реальные соединения
     делает базовый интерпретатор, поэтому добавляем оба (и python.exe, и
     pythonw.exe рядом с ними)."""
+    # sing-box тоже: мост к узлам (bridge.py) — отдельный его процесс, и при
+    # включённом VPN проверка узлов иначе пошла бы через сам VPN (свой же
+    # трафик VPN-процесс sing-box в туннель не заворачивает — правило его не задевает)
+    singbox = find_singbox()
+    extra = [str(singbox)] if singbox else []
     if paths.FROZEN:
-        return [sys.executable]
+        return [sys.executable] + extra
     exes = {sys.executable, getattr(sys, "_base_executable", None) or sys.executable}
     out: list[str] = []
     for exe in exes:
@@ -76,7 +81,7 @@ def own_process_paths() -> list[str]:
             candidate = folder / name
             if candidate.exists():
                 out.append(str(candidate))
-    return sorted(set(out)) or [sys.executable]
+    return (sorted(set(out)) or [sys.executable]) + extra
 
 
 def find_singbox() -> pathlib.Path | None:
@@ -121,6 +126,22 @@ def download_singbox(log: Callable[[str], None] = print) -> pathlib.Path:
         raise RuntimeError("В архиве не нашёлся sing-box.exe")
     log(f"sing-box {SINGBOX_VERSION} установлен в {exe}")
     return exe
+
+
+def ensure_singbox(log: Callable[[str], None] | None = None) -> pathlib.Path | None:
+    """sing-box из папки программы, а если его нет — скачать (один раз).
+    None — не нашёлся и не скачался (без интернета, не тот архив…)."""
+    exe = find_singbox()
+    if exe is not None:
+        return exe
+    import logging
+
+    say = log or logging.getLogger(__name__).info
+    try:
+        return download_singbox(log=say)
+    except Exception as exc:  # noqa: BLE001 — без sing-box просто не будет узлов/VPN
+        say(f"sing-box не скачался: {exc}")
+        return None
 
 
 class SingBoxProcess:

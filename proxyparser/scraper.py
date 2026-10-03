@@ -304,8 +304,11 @@ def merge(proxies: list[Proxy]) -> list[Proxy]:
 
 
 def subnet24(host: str) -> str:
-    parts = host.split(".")
-    return ".".join(parts[:3]) if len(parts) == 4 else host
+    """Подсеть /24 у IP; у домена (узлы VLESS и т.п.) — домен второго уровня."""
+    parts = host.lower().split(".")
+    if len(parts) == 4 and all(x.isdigit() for x in parts):
+        return ".".join(parts[:3])
+    return ".".join(parts[-2:])
 
 
 def limit_farms(proxies: list[Proxy], per_ip: int = FARM_MAX_PER_IP, per_subnet: int = FARM_MAX_PER_SUBNET,

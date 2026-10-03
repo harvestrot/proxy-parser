@@ -9,10 +9,13 @@
 Виды источников (kind):
   * "plain" — текстовый список по ссылке: строки ``ip:port`` или
     ``socks5://ip:port`` (тип из строки важнее поля "type");
-  * "proxyscrape" — встроенный API proxyscrape.com.
+  * "proxyscrape" — встроенный API proxyscrape.com;
+  * "subscription" — подписка с узлами VLESS / VMess / Trojan / Shadowsocks
+    (ссылки vless://… построчно или весь список в base64; см. nodes.py).
 
 "limit" — сколько максимум брать из списка за одно обновление (случайная
-выборка); "enabled": false — временно выключить, не удаляя.
+выборка; у подписок по умолчанию DEFAULT_NODE_LIMIT); "enabled": false —
+временно выключить, не удаляя.
 
 Если файл — нетронутые источники по умолчанию прошлой версии программы, он
 сам обновляется до новых (см. _maybe_upgrade); правленный руками не трогается.
@@ -24,7 +27,7 @@ import logging
 import pathlib
 from typing import Callable
 
-from . import scraper, storage
+from . import nodes, scraper, storage
 from .paths import APP_DIR
 
 log = logging.getLogger(__name__)
@@ -32,13 +35,15 @@ log = logging.getLogger(__name__)
 PROJECT_ROOT = APP_DIR
 SOURCES_FILE = PROJECT_ROOT / "sources.json"
 DEFAULT_PLAIN_LIMIT = 3000
+DEFAULT_NODE_LIMIT = 300  # узлы проверяются через мост sing-box: больше за раз — дольше проверка
 
-CONFIG_VERSION = 2  # растёт, когда меняются источники по умолчанию (см. _maybe_upgrade)
+CONFIG_VERSION = 3  # растёт, когда меняются источники по умолчанию (см. _maybe_upgrade)
 
 _RAW = "https://raw.githubusercontent.com"
 DEFAULT_CONFIG = {
     "_help": (
-        "Источники прокси. kind: plain (текстовый список ip:port по ссылке) или proxyscrape. "
+        "Источники прокси. kind: plain (текстовый список ip:port по ссылке), proxyscrape или "
+        "subscription (подписка с узлами VLESS/VMess/Trojan/Shadowsocks). "
         "type: socks5 / socks4 / http (для plain, если в строках нет схемы). "
         "limit: сколько максимум брать за одно обновление. enabled: true/false. "
         "После правки просто нажми «Обновить список»."
@@ -66,10 +71,10 @@ DEFAULT_CONFIG = {
                   "(из-за неё его и вырезали); без неё — самый большой набор разных SOCKS5",
          "url": f"{_RAW}/proxifly/free-proxy-list/main/proxies/protocols/socks5/data.txt"},
         {"name": "dpangestuw (GitHub)", "kind": "plain", "type": "socks5", "enabled": True, "limit": 2500,
-         "_note": "5165 / 1947 / 797 — второй по числу уникальных SOCKS5; был и ради UDP (звонки)",
+         "_note": "5165 / 1947 / 797 — второй по числу уникальных SOCKS5",
          "url": f"{_RAW}/dpangestuw/Free-Proxy/main/socks5_proxies.txt"},
         {"name": "vmheaven (GitHub)", "kind": "plain", "type": "socks5", "enabled": True,
-         "_note": "1937 / 972 / 245 — половина списка — ферма 69.174.54.x; ради UDP",
+         "_note": "1937 / 972 / 245 — половина списка — ферма 69.174.54.x",
          "url": f"{_RAW}/vmheaven/VMHeaven-Free-Proxy-Updated/main/socks5.txt"},
         {"name": "ALIILAPRO (GitHub)", "kind": "plain", "type": "socks5", "enabled": True,
          "_note": "2572 / 457 / 132",
@@ -79,7 +84,7 @@ DEFAULT_CONFIG = {
                   "перепроверяется каждые 30 минут",
          "url": f"{_RAW}/iplocate/free-proxy-list/main/protocols/socks5.txt"},
         {"name": "elliottophellia (GitHub)", "kind": "plain", "type": "socks5", "enabled": True,
-         "_note": "906 / 146 / 20 — 80% списка — ферма, половина остальных в РФ; ради UDP",
+         "_note": "906 / 146 / 20 — 80% списка — ферма, половина остальных в РФ; маленький, часто перепроверяется",
          "url": f"{_RAW}/elliottophellia/proxylist/master/results/socks5/global/socks5_checked.txt"},
         {"name": "openproxylist.xyz", "kind": "plain", "type": "socks5", "enabled": True,
          "_note": "6,8 тыс., берётся 3000 — запас, временами даёт уникальные",
@@ -99,6 +104,27 @@ DEFAULT_CONFIG = {
         {"name": "monosans http (GitHub)", "kind": "plain", "type": "http", "enabled": True,
          "_note": "217 / 198 / 75 — вернулся: маленький, перепроверяется каждый час",
          "url": f"{_RAW}/monosans/proxy-list/main/proxies/http.txt"},
+        # Узлы VLESS / VMess / Trojan / Shadowsocks: трафик до них зашифрован,
+        # проверяются через мост sing-box (nodes.py, bridge.py). Дополнительные
+        # HTTP/SOCKS-списки (20 штук, 3 октября 2026) дали 1 быстрый прокси на
+        # 9,3 тыс. новых адресов, а 533 узла этих подписок — 13 быстрых.
+        # «_note»: ссылок в подписке / рабочих из проверенных / быстрых (от 500 КБ/с).
+        {"name": "zhuhaiuk узлы (GitHub)", "kind": "subscription", "enabled": True, "limit": None,
+         "_note": "17 / 10 из 16 и 6 из 15 / 6 и 3 — маленькая, но лучшая; обновляется каждый час",
+         "url": f"{_RAW}/zhuhaiuk/free-nodes/main/nodes.txt"},
+        {"name": "F0rc3Run узлы (GitHub)", "kind": "subscription", "enabled": True,
+         "_note": "552 / 10 из 119 и 20 из 300 / 3 и 3 — «лучшие результаты» их проверки; 19 рабочих только у неё",
+         "url": f"{_RAW}/F0rc3Run/F0rc3Run/main/Best-Results/proxies.txt"},
+        {"name": "Epodonios узлы (GitHub)", "kind": "subscription", "enabled": True,
+         "_note": "7744 / 3 из 120 и 1 из 300 / 2 и 1 — огромная, берётся случайная выборка",
+         "url": f"{_RAW}/Epodonios/v2ray-configs/main/All_Configs_Sub.txt"},
+        {"name": "Au1rxx узлы (GitHub)", "kind": "subscription", "enabled": False,
+         "_note": "2000 ссылок / 2 из 120 и 1 из 300 / 1 и 0 — выключена: почти все ссылки ведут на адреса "
+                  "Cloudflare с разными настройками, а узел у нас — адрес:порт (проверяется одна случайная ссылка)",
+         "url": f"{_RAW}/Au1rxx/free-vpn-subscriptions/main/output/protocol/vless/v2ray-base64-0001.txt"},
+        {"name": "awesome-vpn узлы (GitHub)", "kind": "subscription", "enabled": True, "limit": None,
+         "_note": "40 / 1 из 40 и 1 из 36 / 1 и 1",
+         "url": f"{_RAW}/awesome-vpn/awesome-vpn/master/all"},
     ],
     # Проверены 2 октября 2026 и не взяты (вернуть — дописать запись выше):
     #  * давно не обновляются: ClearProxy/checked-proxy-list (с марта 2026),
@@ -118,7 +144,15 @@ DEFAULT_CONFIG = {
     #  * GeoNode API (proxylist.geonode.com) — проверен 2 октября 2026: ~3,8
     #    тыс. свежих, 2335 из них нет в списках выше, но из этих 2335 рабочих
     #    оказалось 5, быстрый — 1 (Индонезия, отклик 1,9 с), в ближней Европе —
-    #    ни одного. Лишние 2,3 тыс. проверок на каждое обновление не окупаются.
+    #    ни одного. Лишние 2,3 тыс. проверок на каждое обновление не окупаются;
+    #  * 3 октября 2026 ещё 20 активных HTTP/SOCKS-списков (sunny9577, Zaeem20,
+    #    Argh94, ProxyScraper, Anonym0usWork1221, Vann-Dev, ProxyGather,
+    #    Thordata, proxygenerator1, xyzs996, KangProxy, Moleway, VMHeaven.io,
+    #    komutan234, proxy-free, LoneKingCode, berkay-digital, spys.me,
+    #    free-proxy-list.net, openproxylist http): 9,3 тыс. новых адресов — 8
+    #    рабочих, 1 быстрый. Перепечатывают тот же пул, что и списки выше;
+    #  * подписки узлов: rtwo2/FastNodes (verified_tls: 0 рабочих из 120),
+    #    barry-far/V2ray-Configs (репозиторий заблокирован GitHub).
 }
 
 # Источники по умолчанию прошлых версий: (kind, url, type, enabled, limit).
@@ -132,6 +166,23 @@ _V1_SOURCES = (
     ("plain", "https://api.openproxylist.xyz/socks5.txt", "socks5", True, DEFAULT_PLAIN_LIMIT),
     ("plain", f"{_RAW}/ALIILAPRO/Proxy/main/socks5.txt", "socks5", True, DEFAULT_PLAIN_LIMIT),
 )
+_V2_SOURCES = (
+    ("proxyscrape", None, None, True, DEFAULT_PLAIN_LIMIT),
+    ("plain", f"{_RAW}/monosans/proxy-list/main/proxies/socks5.txt", "socks5", True, DEFAULT_PLAIN_LIMIT),
+    ("plain", f"{_RAW}/proxifly/free-proxy-list/main/proxies/protocols/socks5/data.txt", "socks5", True,
+     DEFAULT_PLAIN_LIMIT),
+    ("plain", f"{_RAW}/dpangestuw/Free-Proxy/main/socks5_proxies.txt", "socks5", True, 2500),
+    ("plain", f"{_RAW}/vmheaven/VMHeaven-Free-Proxy-Updated/main/socks5.txt", "socks5", True, DEFAULT_PLAIN_LIMIT),
+    ("plain", f"{_RAW}/ALIILAPRO/Proxy/main/socks5.txt", "socks5", True, DEFAULT_PLAIN_LIMIT),
+    ("plain", f"{_RAW}/iplocate/free-proxy-list/main/protocols/socks5.txt", "socks5", True, DEFAULT_PLAIN_LIMIT),
+    ("plain", f"{_RAW}/elliottophellia/proxylist/master/results/socks5/global/socks5_checked.txt", "socks5", True,
+     DEFAULT_PLAIN_LIMIT),
+    ("plain", "https://api.openproxylist.xyz/socks5.txt", "socks5", True, DEFAULT_PLAIN_LIMIT),
+    ("plain", f"{_RAW}/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt", "http", True, None),
+    ("plain", f"{_RAW}/hproxy-com/free-proxy-list/main/https.txt", "http", True, DEFAULT_PLAIN_LIMIT),
+    ("plain", f"{_RAW}/maximilianfeix/free-proxy-list/main/https.txt", None, True, DEFAULT_PLAIN_LIMIT),
+    ("plain", f"{_RAW}/monosans/proxy-list/main/proxies/http.txt", "http", True, DEFAULT_PLAIN_LIMIT),
+)
 _OLD_DEFAULTS = (
     _V1_SOURCES,  # 1.0.0
     _V1_SOURCES + (  # 1.1.0
@@ -140,6 +191,7 @@ _OLD_DEFAULTS = (
         ("plain", f"{_RAW}/vmheaven/VMHeaven-Free-Proxy-Updated/main/socks5.txt", "socks5", True, DEFAULT_PLAIN_LIMIT),
         ("plain", f"{_RAW}/dpangestuw/Free-Proxy/main/socks5_proxies.txt", "socks5", True, 2500),
     ),
+    _V2_SOURCES,  # 1.1.x–1.2.0: до узлов VLESS
 )
 
 
@@ -170,6 +222,9 @@ def build_sources(config: dict) -> dict[str, Callable[[scraper.Fetcher], list]]:
         try:
             if kind == "proxyscrape":
                 out[name] = scraper.scrape_proxyscrape
+            elif kind == "subscription":
+                limit = entry.get("limit", DEFAULT_NODE_LIMIT)
+                out[name] = nodes.subscription_source(name, entry["url"], int(limit) if limit else None)
             elif kind == "plain":
                 url = entry["url"]
                 ptype = scraper.type_from_name(entry["type"]) if entry.get("type") else None

@@ -72,6 +72,7 @@ def load_scraped(path: pathlib.Path | None = None) -> list[Proxy]:
                 source_latency_ms=item.get("source_latency_ms"),
                 source=item.get("source"),
                 country_code=item.get("country_code"),
+                link=item.get("link"),
             )
         )
     return out
@@ -120,6 +121,7 @@ def load_working_proxies(path: pathlib.Path | None = None) -> list[CheckResult]:
             country_code=item.get("country_code"),
             network=item.get("network"),
             asn=item.get("asn"),
+            link=item.get("link"),
         )
         if is_excluded(proxy):
             continue  # например, сохранено до появления фильтра по странам
@@ -129,7 +131,6 @@ def load_working_proxies(path: pathlib.Path | None = None) -> list[CheckResult]:
                 working=True,
                 latency_ms=item.get("latency_ms"),
                 checked_at=item.get("checked_at", 0.0),
-                udp_ms=item.get("udp_ms"),
                 speed_kbps=item.get("speed_kbps"),
                 rep_ok=item.get("rep_ok", 0),
                 rep_checks=item.get("rep_checks", 0),

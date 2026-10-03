@@ -13,18 +13,20 @@
 
 Мы только генерируем конфиг из списка рабочих прокси (см. pick_proxies: на
 первом месте реальная скорость и стабильность по истории, медленные
-отбрасываются). UDP (голос) идёт отдельной группой из прокси, у которых он
-реально проходит. Группы sing-box сам перепроверяет по таймеру и выбирает
-лучший живой.
+отбрасываются). Группу sing-box сам перепроверяет по таймеру и выбирает
+лучший живой. UDP бесплатные прокси не пропускают — голос Discord идёт
+напрямую, QUIC отклоняется (браузер сразу переходит на обычный HTTPS); если
+в VPN есть узлы VLESS / VMess / Trojan / Shadowsocks — UDP идёт через них.
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import pathlib
 
-from . import geo, storage
+from . import geo, nodes, storage
 from .app_routing import MODE_EXCEPT, MODE_ONLY, RoutingSettings
-from .models import CheckResult, ProxyType
+from .models import CheckResult, Proxy, ProxyType
 
 TUN_INTERFACE_NAME = "sing-tun"
 TUN_ADDRESS = "172.19.0.1/30"
@@ -35,9 +37,12 @@ URLTEST_URL = "https://www.gstatic.com/generate_204"
 URLTEST_INTERVAL = "30s"  # бесплатные прокси отваливаются часто — проверяем чаще
 CLASH_API_ADDR = "127.0.0.1:9090"  # GUI читает отсюда, какой прокси выбран и кто жив
 DNS_BOOTSTRAP_SERVER = "1.1.1.1"
+DIRECT_DNS_TAG = "direct-dns"  # DoH к 1.1.1.1 напрямую, мимо прокси
 
-# Порядок приоритета, как просил пользователь: SOCKS5 -> SOCKS4 -> HTTPS.
-_TIER_ORDER = (ProxyType.SOCKS5, ProxyType.SOCKS4, ProxyType.HTTPS)
+# Порядок приоритета, как просил пользователь: SOCKS5 -> SOCKS4 -> HTTPS;
+# узлы с шифрованием (VLESS / Trojan / VMess / Shadowsocks) — сразу после SOCKS5.
+_TIER_ORDER = (ProxyType.SOCKS5, ProxyType.VLESS, ProxyType.TROJAN, ProxyType.VMESS, ProxyType.SS,
+               ProxyType.SOCKS4, ProxyType.HTTPS)
 
 
 FAST_LATENCY_MS = 2500  # медленнее этого прокси в VPN почти бесполезен
@@ -63,14 +68,13 @@ STABILITY_MIN_SUCCESS = 0.6
 # «шума» в пинге (на старте первые замеры особенно шумные).
 URLTEST_TOLERANCE_MS = 1000
 
-# UDP (голос Discord и т.п.) — отдельная группа из SOCKS5, у которых UDP
-# реально проходит (серия пакетов, а не один).
+# UDP (голос Discord, звонки, игры). Бесплатные HTTP/SOCKS-прокси его не
+# пропускают (HTTP не умеет вовсе, рабочий UDP у SOCKS5 — у единиц и с
+# потерями), а узлы VLESS / VMess / Trojan / Shadowsocks передают его штатно.
+# Есть в VPN рабочие узлы — весь UDP (кроме QUIC) идёт через отдельную группу
+# из них; нет — голос Discord напрямую (иначе звонки не работали бы совсем).
 UDP_URLTEST_TAG = "auto-udp"
-MAX_UDP_PROXIES = 8
-UDP_MIN_SPEED_KBPS = 30  # голосу много не надо, но прокси на 2–3 КБ/с ещё и теряет пакеты
-
-# Процессы Discord: если прокси с UDP не нашлось, их UDP (голос) пускаем
-# напрямую — иначе звонки не работают вовсе.
+MAX_UDP_NODES = 8
 DISCORD_PROCESSES = ["Discord.exe", "DiscordPTB.exe", "DiscordCanary.exe"]
 
 
@@ -79,7 +83,8 @@ def _latency(r: CheckResult) -> float:
 
 
 # При прочих равных SOCKS5 впереди (как просили), но быстрый HTTPS не теряется.
-TYPE_FACTOR = {ProxyType.SOCKS5: 1.0, ProxyType.SOCKS4: 0.85, ProxyType.HTTPS: 0.85}
+TYPE_FACTOR = {ProxyType.SOCKS5: 1.0, ProxyType.SOCKS4: 0.85, ProxyType.HTTPS: 0.85,
+               ProxyType.VLESS: 1.0, ProxyType.TROJAN: 1.0, ProxyType.VMESS: 1.0, ProxyType.SS: 1.0}
 
 
 def score(r: CheckResult) -> float:
@@ -105,8 +110,12 @@ MAX_PER_SUBNET = 2  # не больше стольких прокси из од�
 
 
 def subnet(host: str) -> str:
-    parts = host.split(".")
-    return ".".join(parts[:3]) if len(parts) == 4 else host
+    """«Сеть» прокси для разнообразия группы: у IP — подсеть /24, у домена
+    (узлы VLESS и т.п.) — домен второго уровня: *.3dns.vip — один провайдер."""
+    parts = host.lower().split(".")
+    if len(parts) == 4 and all(x.isdigit() for x in parts):
+        return ".".join(parts[:3])
+    return ".".join(parts[-2:])
 
 
 def diversify(ranked: list[CheckResult], limit: int = MAX_PER_SUBNET) -> list[CheckResult]:
@@ -146,6 +155,13 @@ def is_unstable(r: CheckResult) -> bool:
     return r.rep_checks >= STABILITY_MIN_CHECKS and r.rep_ok / r.rep_checks < STABILITY_MIN_SUCCESS
 
 
+def ranked(results: list[CheckResult]) -> list[CheckResult]:
+    """Рабочие прокси в порядке ценности для VPN — тем же рейтингом, что и
+    группа (скорость × надёжность × география × сеть); медленные и
+    нестабильные по истории — в конце. Для таблицы в окне."""
+    return sorted((r for r in results if r.working), key=lambda r: (is_slow(r), is_unstable(r), _rank(r)))
+
+
 def _types_used(chosen: list[CheckResult]) -> list[ProxyType]:
     present = {r.proxy.type for r in chosen}
     return [t for t in _TIER_ORDER if t in present]
@@ -156,8 +172,8 @@ def pick_proxies(results: list[CheckResult], max_proxies: int = 15) -> tuple[lis
 
     1. Есть прокси с хорошей ЗАМЕРЕННОЙ скоростью и нормальной задержкой —
        группа из них. Тип тут почти не важен: для обычного трафика
-       HTTPS-прокси (CONNECT) ничем не хуже SOCKS5, а UDP идёт отдельной
-       группой. Поэтому быстрый HTTPS не теряется из-за медленных SOCKS5;
+       HTTPS-прокси (CONNECT) ничем не хуже SOCKS5 (UDP через VPN не идёт
+       вовсе). Поэтому быстрый HTTPS не теряется из-за медленных SOCKS5;
        SOCKS5 остаётся первым при прочих равных.
     2. Таких меньше MIN_PROXIES — добираем до MIN_PROXIES следующими по
        «ценности» (с нормальной задержкой), а не размываем группу до 15.
@@ -243,23 +259,31 @@ def _pick_by_tiers(working: list[CheckResult], max_proxies: int, is_fast) -> tup
     return chosen[:max_proxies], used
 
 
-UDP_MAX_TCP_LATENCY_MS = 4000  # UDP через SOCKS5 начинается с TCP-рукопожатия; sing-box ждёт его 5 с
+def pick_udp_nodes(results: list[CheckResult], limit: int = MAX_UDP_NODES) -> list[CheckResult]:
+    """Узлы для UDP (голос, игры): рабочие, не медленные по замеру, с
+    нормальной задержкой — лучшие по рейтингу, стабильные впереди."""
+    good = [r for r in results if r.working and r.proxy.type.is_node and not is_slow(r)
+            and _latency(r) <= FAST_LATENCY_MS]
+    return diversify(sorted(good, key=lambda r: (is_unstable(r), _rank(r))))[:limit]
 
 
-def pick_udp_proxies(results: list[CheckResult], limit: int = MAX_UDP_PROXIES) -> list[CheckResult]:
-    """Прокси, через которые реально проходит UDP (голос), — по задержке UDP,
-    стабильные по истории впереди. Не берём:
-      * прокси, до которых TCP-рукопожатие дольше ~4 с — sing-box отвалится
-        по таймауту раньше, чем пойдёт голос;
-      * замеренно медленнее UDP_MIN_SPEED_KBPS — такие и UDP-пакеты теряют
-        (на проверке: 2,5 КБ/с и 20% потерь)."""
-    udp = [r for r in results if r.working and r.udp and r.proxy.type == ProxyType.SOCKS5
-           and _latency(r) <= UDP_MAX_TCP_LATENCY_MS
-           and (r.speed_kbps is None or r.speed_kbps >= UDP_MIN_SPEED_KBPS)]
-    return diversify(sorted(udp, key=lambda r: (is_unstable(r), r.udp_ms)))[:limit]
+def _is_ip(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False
 
 
-def _outbound_for(ptype: ProxyType, tag: str, host: str, port: int) -> dict:
+def _outbound_for(proxy: Proxy, tag: str) -> dict:
+    if proxy.type.is_node:
+        ob = {**nodes.outbound(proxy), "tag": tag, "connect_timeout": CONNECT_TIMEOUT}
+        if not _is_ip(proxy.host):
+            # адрес узла-домена — прямым DoH, а не через группу VPN (узел искал
+            # бы свой же адрес через себя)
+            ob["domain_resolver"] = {"server": DIRECT_DNS_TAG, "strategy": "ipv4_only"}
+        return ob
+    ptype, host, port = proxy.type, proxy.host, proxy.port
     base = {"tag": tag, "server": host, "server_port": port, "connect_timeout": CONNECT_TIMEOUT}
     if ptype == ProxyType.SOCKS5:
         return {"type": "socks", **base, "version": "5"}
@@ -274,7 +298,8 @@ def _tag(prefix: str, i: int, r: CheckResult) -> str:
     return f"proxy-{prefix}{i}-{r.proxy.host.replace('.', '_')}-{r.proxy.port}"
 
 
-def _routing_rules(routing: RoutingSettings, has_udp_group: bool, main_tag: str = URLTEST_TAG) -> tuple[list[dict], str]:
+def _routing_rules(routing: RoutingSettings, main_tag: str = URLTEST_TAG,
+                   has_udp_group: bool = False) -> tuple[list[dict], str]:
     """Правила маршрутизации по приложениям (идут после «локальная сеть —
     напрямую») и итоговый outbound для всего остального. ``main_tag`` — куда
     идёт трафик «через прокси»: группа автовыбора или закреплённый прокси."""
@@ -286,7 +311,7 @@ def _routing_rules(routing: RoutingSettings, has_udp_group: bool, main_tag: str 
     if has_udp_group:
         udp_rule = {"network": "udp", "outbound": UDP_URLTEST_TAG}
     else:
-        # через прокси без UDP голос не пойдёт точно — пробуем напрямую
+        # без узлов голос через прокси не пойдёт точно — пробуем напрямую
         udp_rule = {"process_name": DISCORD_PROCESSES, "network": "udp", "outbound": "direct"}
 
     if mode == MODE_ONLY:
@@ -295,7 +320,7 @@ def _routing_rules(routing: RoutingSettings, has_udp_group: bool, main_tag: str 
         rules = [{"process_name": names, **quic_reject}]
         if has_udp_group:
             rules.append({"process_name": names, "network": "udp", "outbound": UDP_URLTEST_TAG})
-        # без группы с UDP их UDP (кроме QUIC) уходит напрямую — по final
+        # без узлов их UDP (кроме QUIC) уходит напрямую — по final
         rules.append({"process_name": names, "network": "tcp", "outbound": main_tag})
         return rules, "direct"
 
@@ -340,7 +365,7 @@ def build_config(
     tag_by_addr: dict[str, str] = {}
     for i, r in enumerate(chosen):
         tag = _tag("", i, r)
-        outbounds.append(_outbound_for(r.proxy.type, tag, r.proxy.host, r.proxy.port))
+        outbounds.append(_outbound_for(r.proxy, tag))
         tags.append(tag)
         tag_by_addr[r.proxy.address] = tag
 
@@ -353,20 +378,20 @@ def build_config(
         pin_tag = tag_by_addr.get(pin.proxy.address)
         if pin_tag is None:
             pin_tag = _tag("p", 0, pin)
-            outbounds.append(_outbound_for(pin.proxy.type, pin_tag, pin.proxy.host, pin.proxy.port))
+            outbounds.append(_outbound_for(pin.proxy, pin_tag))
             tags.append(pin_tag)
             tag_by_addr[pin.proxy.address] = pin_tag
     main_tag = PIN_SELECTOR_TAG if pin_tag else URLTEST_TAG
 
-    # Отдельная группа для UDP (голос): только прокси, у которых при проверке
-    # реально прошёл UDP. Прокси, попавший в обе группы, — один outbound.
-    udp_chosen = pick_udp_proxies(results)
+    # Группа для UDP — из узлов (см. UDP_URLTEST_TAG). Узел, попавший в обе
+    # группы, — один outbound.
     udp_tags = []
-    for i, r in enumerate(udp_chosen):
+    for i, r in enumerate(pick_udp_nodes(results)):
         tag = tag_by_addr.get(r.proxy.address)
         if tag is None:
             tag = _tag("u", i, r)
-            outbounds.append(_outbound_for(r.proxy.type, tag, r.proxy.host, r.proxy.port))
+            outbounds.append(_outbound_for(r.proxy, tag))
+            tag_by_addr[r.proxy.address] = tag
         udp_tags.append(tag)
 
     outbounds.append(
@@ -397,15 +422,18 @@ def build_config(
     outbounds.append({"type": "direct", "tag": "direct"})
 
     routing = routing or RoutingSettings()
-    app_rules, final = _routing_rules(routing, bool(udp_tags), main_tag)
+    app_rules, final = _routing_rules(routing, main_tag, has_udp_group=bool(udp_tags))
     if routing.effective_mode() == MODE_ONLY:
         # Через прокси идут лишь выбранные приложения — и DNS не должен зависеть
         # от бесплатных прокси: если все они умрут, остальной интернет обязан
         # работать. DoH к 1.1.1.1 напрямую: провайдер не подменит ответ, а
         # выбранным приложениям хватает того, что их соединения идут через прокси.
-        dns_server = {"type": "https", "tag": "direct-dns", "server": DNS_BOOTSTRAP_SERVER}
+        dns_server = {"type": "https", "tag": DIRECT_DNS_TAG, "server": DNS_BOOTSTRAP_SERVER}
     else:
         dns_server = {"type": "https", "tag": "remote-dns", "server": DNS_BOOTSTRAP_SERVER, "detour": main_tag}
+    dns_servers = [dns_server]
+    if dns_server["tag"] != DIRECT_DNS_TAG and any("domain_resolver" in o for o in outbounds):
+        dns_servers.append({"type": "https", "tag": DIRECT_DNS_TAG, "server": DNS_BOOTSTRAP_SERVER})
 
     # Трафик самой программы (проверка прокси, загрузка списков) — мимо VPN:
     # иначе проверка шла бы через уже выбранный прокси, а не с обычного
@@ -420,7 +448,7 @@ def build_config(
         # почти никогда не умеют UDP, а обычный DNS у провайдера в РФ
         # может подменяться. DoH до 1.1.1.1 решает обе проблемы.
         "dns": {
-            "servers": [dns_server],
+            "servers": dns_servers,
             "final": dns_server["tag"],
             "strategy": "ipv4_only",
         },
@@ -445,7 +473,7 @@ def build_config(
                 # локальная сеть (роутер, принтеры и т.п.) — напрямую
                 {"ip_is_private": True, "outbound": "direct"},
                 # по приложениям (см. _routing_rules): что через прокси, что
-                # мимо; QUIC и UDP (голос) — там же
+                # мимо; QUIC и голос Discord — там же
                 *app_rules,
             ],
             "auto_detect_interface": True,
@@ -453,6 +481,10 @@ def build_config(
         },
         "experimental": {"clash_api": {"external_controller": CLASH_API_ADDR}},
     }
+    if len(dns_servers) > 1:
+        # при нескольких DNS-серверах sing-box требует явный «по умолчанию»: как и
+        # раньше — основной (у узлов-доменов свой, прямой — см. _outbound_for)
+        config["route"]["default_domain_resolver"] = dns_server["tag"]
     types_txt = " + ".join(t.value for t in used_types)
     fastest = _latency(chosen[0])
     subnets = len({subnet(r.proxy.host) for r in chosen})
@@ -461,11 +493,6 @@ def build_config(
     if any(is_slow(r) for r in chosen):
         speed_txt += (f" (ВНИМАНИЕ: быстрее {MIN_SPEED_KBPS} КБ/с прокси не нашлось — "
                       "взяты медленные; обнови список)")
-    if udp_tags:
-        udp_txt = f"Звонки/UDP: через {len(udp_tags)} прокси с проверенным UDP."
-    else:
-        udp_txt = ("Звонки/UDP: прокси с UDP не нашлось — голос Discord идёт напрямую "
-                   "(мимо VPN); заработает ли он, зависит от провайдера.")
     extra = ""
     if countries:
         extra += (f" Страны: {', '.join(countries)}." if countries_ok else
@@ -474,6 +501,8 @@ def build_config(
         extra += f" Закреплён прокси {pin.proxy.address} (если перестанет отвечать — временно автовыбор)."
     elif pinned:
         extra += f" Закреплённый прокси {pinned} сейчас не работает — автовыбор лучшего."
+    udp_txt = (f"UDP (звонки, игры) — через {len(udp_tags)} узл{'ов' if len(udp_tags) > 4 else 'а'} VLESS/Trojan/SS."
+               if udp_tags else "Голос Discord — напрямую.")
     meta = {
         "proxy_tier_used": types_txt,
         "proxy_count": len(chosen),
@@ -484,7 +513,7 @@ def build_config(
             f"В VPN {len(chosen)} прокси ({types_txt}), самый быстрый при проверке — "
             f"{fastest:.0f} мс{speed_txt}, из {subnets} разных подсетей. "
             "sing-box сам выбирает лучший и переключается при обрыве. "
-            + udp_txt + f" Маршрутизация: {routing.describe()}." + extra
+            + f"{udp_txt} Маршрутизация: {routing.describe()}." + extra
         ),
     }
     return config, meta

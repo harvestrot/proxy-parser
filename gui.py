@@ -11,6 +11,7 @@ import pathlib
 import queue
 import sys
 import threading
+import time
 import tkinter as tk
 from tkinter import messagebox, ttk
 
@@ -41,6 +42,20 @@ def _network_text(p) -> str:
     return f"{label} · {owner}" if owner else label
 
 
+def _speed_text(kbps: float | None) -> str:
+    """«7,1 МБ/с» / «960 КБ/с» / «—» (не замерена)."""
+    if kbps is None:
+        return "—"
+    if kbps >= 1000:
+        return f"{kbps / 1000:.1f} МБ/с".replace(".", ",")
+    return f"{kbps:.0f} КБ/с"
+
+
+def _count(n: int, one: str, many: str) -> str:
+    """«1 рабочий», «35 рабочих» — прилагательному хватает двух форм."""
+    return f"{n} {one if n % 10 == 1 and n % 100 != 11 else many}"
+
+
 class App:
     def __init__(self, root: tk.Tk, start_hidden: bool = False) -> None:
         self.root = root
@@ -69,8 +84,7 @@ class App:
 
         self._render_results(self.ctl.results)
         self._apply_vpn_state("off")
-        if not self.ctl.results:
-            self.status_var.set("Список прокси пуст — нажми «Обновить список»")
+        self.status_var.set(self._idle_status() if self.ctl.results else "Список прокси пуст")
 
         if start_hidden:  # автозапуск с Windows: сразу в трей (без трея — свёрнутым)
             self.hide_window() if self.tray.available else root.iconify()
@@ -166,7 +180,7 @@ class App:
             self.vpn_button = ttk.Button(frame, style="Accent.TButton", command=self.on_vpn_click)
         self.vpn_button.grid(row=0, column=2, rowspan=2, sticky="e")
 
-        ttk.Separator(frame).grid(row=2, column=0, columnspan=3, sticky="ew", pady=16)
+        tk.Frame(frame, height=1, bg=theme.BORDER).grid(row=2, column=0, columnspan=3, sticky="ew", pady=16)
 
         # плитки: маршрутизация, закреплённый прокси, страны
         tiles = ttk.Frame(frame)
@@ -193,18 +207,38 @@ class App:
         value.pack(anchor="w", pady=(4, 0))
         sub = ttk.Label(inner, text="", style="TileSub.TLabel", wraplength=300)
         sub.pack(anchor="w", pady=(2, 0))
+        # перенос — по ширине плитки, а не по заданной заранее (в узком окне текст обрезался)
+        inner.bind("<Configure>", lambda e: [label.configure(wraplength=max(120, e.width - 26))
+                                             for label in (value, sub)])
         button = ttk.Button(inner, text=link + "  →", style="TileLink.TButton", command=command)
         button.pack(anchor="w", pady=(8, 0))
         return value, sub, button
+
+    # колонки таблицы: (id, заголовок, ширина, наименьшая ширина, выравнивание,
+    # доля свободного места при растяжении)
+    COLUMNS = (
+        ("vpn", "VPN", 96, 84, "w", 0),
+        ("type", "ТИП", 70, 62, "center", 0),
+        ("address", "АДРЕС", 165, 150, "w", 0),  # адрес не длиннее 21 знака — запас ему не нужен
+        ("country", "СТРАНА", 100, 76, "w", 1),
+        ("network", "СЕТЬ", 150, 96, "w", 4),
+        ("latency", "ОТКЛИК", 76, 68, "e", 0),
+        ("speed", "СКОРОСТЬ", 96, 86, "e", 0),
+        ("rel", "НАДЁЖНОСТЬ", 98, 90, "center", 0),
+        ("source", "ИСТОЧНИК", 130, 110, "w", 2),
+    )
+    NARROW_HIDDEN = ("source",)  # прячется, если окно слишком узкое для всех колонок
 
     def _build_proxy_panel(self) -> None:
         frame = self._card(fill="both", expand=True, pady=(0, 12))
 
         top = ttk.Frame(frame)
         top.pack(fill="x")
-        ttk.Label(top, text="Рабочие прокси", style="CardTitle.TLabel").pack(side="left")
+        title = ttk.Frame(top)
+        title.pack(side="left")
+        ttk.Label(title, text="Рабочие прокси", style="CardTitle.TLabel").pack(anchor="w")
         self.counts_var = tk.StringVar(value="")
-        ttk.Label(top, textvariable=self.counts_var, style="Faint.TLabel").pack(side="left", padx=(12, 0), pady=(3, 0))
+        ttk.Label(title, textvariable=self.counts_var, style="Faint.TLabel").pack(anchor="w", pady=(2, 0))
         self.refresh_button = ttk.Button(top, text="Обновить список", style="Accent.TButton",
                                          command=self.on_refresh_click)
         self.refresh_button.pack(side="right")
@@ -216,40 +250,63 @@ class App:
                         command=self.on_autoheal_toggle).pack(side="right", padx=(0, 18))
 
         prog = ttk.Frame(frame)
-        prog.pack(fill="x", pady=(10, 8))
+        prog.pack(fill="x", pady=(12, 10))
+        line = ttk.Frame(prog)
+        line.pack(fill="x")
         self.status_var = tk.StringVar(value="")
-        ttk.Label(prog, textvariable=self.status_var, style="Muted.TLabel").pack(anchor="w")
+        ttk.Label(line, textvariable=self.status_var, style="Muted.TLabel").pack(side="left")
+        ttk.Label(line, text="двойной клик — скопировать  ·  правый клик — закрепить или исключить",
+                  style="Faint.TLabel").pack(side="right")
         # полоса прогресса видна только во время обновления списка
         self.progress = ttk.Progressbar(prog, mode="determinate")
 
         table_frame = tk.Frame(frame, bg=theme.SURFACE, highlightthickness=1, highlightbackground=theme.BORDER)
         table_frame.pack(fill="both", expand=True)
-        columns = ("type", "address", "country", "network", "latency", "speed", "udp", "rel", "source")
-        self.table = ttk.Treeview(table_frame, columns=columns, show="headings", height=10)
-        for col, title, width, anchor in (
-            ("type", "ТИП", 80, "center"),
-            ("address", "АДРЕС", 190, "w"),
-            ("country", "СТРАНА", 120, "w"),
-            ("network", "СЕТЬ", 150, "w"),  # провайдер / хостинг (geo.py) и чья сеть
-            ("latency", "ОТКЛИК, МС", 95, "e"),
-            ("speed", "СКОРОСТЬ, КБ/С", 115, "e"),
-            ("udp", "UDP", 60, "center"),
-            ("rel", "НАДЁЖНОСТЬ", 100, "center"),
-            ("source", "ИСТОЧНИК", 150, "w"),
-        ):
-            self.table.heading(col, text=title, anchor=anchor)
-            self.table.column(col, width=width, anchor=anchor)
+        self.table = ttk.Treeview(table_frame, columns=[c[0] for c in self.COLUMNS], show="headings", height=5)
+        for col, heading, width, _least, anchor, _share in self.COLUMNS:
+            self.table.heading(col, text=heading, anchor=anchor)
+            self.table.column(col, width=width, minwidth=30, anchor=anchor, stretch=False)
         scroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.table.yview)
         self.table.configure(yscrollcommand=scroll.set)
         self.table.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
+        self.table.bind("<Configure>", self._fit_columns)
         self.table.bind("<Double-1>", self.on_row_double_click)
-        self.table.bind("<Button-3>", self.on_row_menu)  # правый клик — закрепить / скопировать
-        self.table.tag_configure("odd", background="#171b25")
+        self.table.bind("<Button-3>", self.on_row_menu)  # правый клик — закрепить / скопировать / исключить
+        self.table.tag_configure("odd", background=theme.ZEBRA)
         self.table.tag_configure("slow", foreground=theme.FAINT)
         self.table.tag_configure("pinned", background=theme.PIN_BG, foreground=theme.PIN_FG)
-        ttk.Label(frame, text="Двойной клик — скопировать адрес  ·  правый клик — закрепить для VPN",
-                  style="Faint.TLabel").pack(anchor="w", pady=(8, 0))
+        self.table.tag_configure("active", background=theme.ACTIVE_BG, foreground=theme.ACTIVE_FG)
+        self.empty_label = ttk.Label(table_frame, style="Muted.TLabel", justify="center",
+                                     text="Пока пусто — нажми «Обновить список»:\n"
+                                          "программа соберёт бесплатные прокси и проверит их")
+        self._rows: dict[str, CheckResult] = {}  # адрес -> результат, в порядке строк таблицы
+        self._active: str | None = None          # через какой прокси сейчас идёт VPN
+        self._group: set[str] = set()            # все прокси группы VPN
+
+    def _fit_columns(self, _event=None) -> None:
+        """Колонки по ширине таблицы. Шире обычного — свободное место делят
+        страна, сеть и источник; уже — сначала прячется источник, потом
+        колонки ужимаются до наименьшей ширины (за счёт запаса у каждой)."""
+        width = self.table.winfo_width()
+        if width <= 1:
+            return
+        shown = list(self.COLUMNS)
+        if sum(c[2] for c in shown) > width:
+            shown = [c for c in shown if c[0] not in self.NARROW_HIDDEN]
+        ids = tuple(c[0] for c in shown)
+        if tuple(self.table["displaycolumns"]) != ids:
+            self.table.configure(displaycolumns=ids)
+        spare = width - sum(c[2] for c in shown)
+        if spare >= 0:
+            total_share = sum(c[5] for c in shown) or 1
+            widths = [base + spare * share // total_share for _id, _h, base, _l, _a, share in shown]
+        else:
+            slack = sum(base - least for _id, _h, base, least, _a, _s in shown) or 1
+            cut = min(1.0, -spare / slack)
+            widths = [base - int((base - least) * cut) for _id, _h, base, least, _a, _s in shown]
+        for (col, *_rest), w in zip(shown, widths):
+            self.table.column(col, width=w)
 
     def _build_log_panel(self) -> None:
         frame = self._card(side="bottom", fill="x", pady=(0, 16))
@@ -323,7 +380,7 @@ class App:
             if r is None:
                 self.pin_sub.configure(text="Сейчас не работает — автовыбор лучшего")
             else:
-                speed = f" · {r.speed_kbps:.0f} КБ/с" if r.speed_kbps else ""
+                speed = f" · {_speed_text(r.speed_kbps)}" if r.speed_kbps else ""
                 self.pin_sub.configure(text=f"Закреплён · {r.proxy.country or 'страна неизвестна'}{speed}")
             self.unpin_button.state(["!disabled"])
             self.unpin_button.configure(text="Открепить  →")
@@ -374,7 +431,17 @@ class App:
         else:
             menu.add_command(label="★ Закрепить для VPN", command=lambda: self._pin(iid))
         menu.add_command(label="Скопировать адрес", command=lambda: self.on_row_double_click(None))
+        menu.add_separator()
+        menu.add_command(label="Исключить — больше не использовать", command=lambda: self._ban(iid))
         menu.tk_popup(event.x_root, event.y_root)
+
+    def _ban(self, address: str) -> None:
+        text = (f"Исключить {address}?\n\nОн больше не будет проверяться и не попадёт в VPN. Пригодится, если "
+                "через него не открываются сайты или браузер пишет «Подключение не защищено».")
+        if self.ctl.vpn_state == "on" and (address == self._active or address in self._group):
+            text += "\n\nОн сейчас в VPN — VPN перезапустится без него (обрыв около секунды)."
+        if messagebox.askyesno(APP_TITLE, text, parent=self.root):
+            self.ctl.ban_proxy(address)
 
     def on_autoheal_toggle(self) -> None:
         self.ctl.autoheal = bool(self.autoheal_var.get())
@@ -406,13 +473,17 @@ class App:
         sel = self.table.selection()
         if not sel:
             return
-        address = sel[0]  # идентификатор строки — сам адрес (в колонке может стоять «★ »)
-        ptype = self.table.item(address, "values")[0]
-        scheme = {"SOCKS5": "socks5", "SOCKS4": "socks4", "HTTPS": "http"}.get(ptype, "socks5")
-        text = f"{scheme}://{address}"
+        address = sel[0]  # идентификатор строки — сам адрес
+        r = self._rows.get(address)
+        if r is not None and r.proxy.link:
+            text = r.proxy.link  # узел — его ссылка (подойдёт для v2rayN, Hiddify и т.п.)
+        else:
+            ptype = r.proxy.type.value if r else ""
+            scheme = {"SOCKS5": "socks5", "SOCKS4": "socks4", "HTTPS": "http"}.get(ptype, "socks5")
+            text = f"{scheme}://{address}"
         self.root.clipboard_clear()
         self.root.clipboard_append(text)
-        self.status_var.set(f"Скопировано: {text}")
+        self.status_var.set(f"Скопировано: {text if len(text) < 70 else text[:67] + '…'}")
 
     def on_close(self) -> None:
         """Крестик окна: свернуть в трей (если так настроено и трей есть) или выйти."""
@@ -478,6 +549,11 @@ class App:
             else:
                 self._apply_vpn_state(self.ctl.vpn_state)  # VPN выключен — вернуть подсказку
             self.tray.set_tooltip(f"{APP_TITLE} — {VPN_LABELS[self.ctl.vpn_state][0]}\n{text}")
+        elif kind == "vpn_active":
+            active, group = event[1], set(event[2])
+            if (active, group) != (self._active, self._group):
+                self._active, self._group = active, group
+                self._paint_rows()
         elif kind == "ask":
             text, holder = event[1], event[2]
             self.show_window()  # вопрос из трея должен быть виден
@@ -535,40 +611,63 @@ class App:
             self._pulse_job = self.root.after(110, self._animate_dot, frames, i + 1)
 
     def _render_results(self, results: list[CheckResult]) -> None:
+        """Таблица в порядке рейтинга VPN: лучшие сверху, медленные — внизу."""
         self.table.delete(*self.table.get_children())
-        counts = {"SOCKS5": 0, "SOCKS4": 0, "HTTPS": 0}
+        self._rows = {}
+        for r in singbox_config.ranked(results):
+            if r.proxy.address not in self._rows:
+                self._rows[r.proxy.address] = r
+                self.table.insert("", "end", iid=r.proxy.address)
+        self._paint_rows()
+        rows = list(self._rows.values())
+        if rows:
+            self.empty_label.place_forget()
+            fast = sum(1 for r in rows if (r.speed_kbps or 0) >= singbox_config.GOOD_SPEED_KBPS)
+            isp = sum(1 for r in rows if r.proxy.network in (geo.NET_ISP, geo.NET_MOBILE))
+            node_count = sum(1 for r in rows if r.proxy.type.is_node)
+            parts = [_count(len(rows), "рабочий", "рабочих"), _count(fast, "быстрый", "быстрых"),
+                     f"{isp} у провайдера"]
+            if node_count:
+                parts.append(f"{node_count} VLESS/Trojan/SS")
+            self.counts_var.set("  ·  ".join(parts))
+        else:
+            self.empty_label.place(relx=0.5, rely=0.5, anchor="center")
+            self.counts_var.set("пока нет проверенных прокси")
+
+    def _paint_rows(self) -> None:
+        """Значения и подсветка строк: через какой прокси идёт VPN, кто в группе,
+        закреплённый; медленные (в VPN не попадут) — приглушённо."""
         pinned = self.ctl.settings.pinned_address
-        row = 0
-        for r in results:
+        for i, (address, r) in enumerate(self._rows.items()):
             p = r.proxy
-            if self.table.exists(p.address):
-                continue
-            counts[p.type.value] = counts.get(p.type.value, 0) + 1
-            latency = f"{r.latency_ms:.0f}" if r.latency_ms is not None else "—"
-            speed = f"{r.speed_kbps:.0f}" if r.speed_kbps is not None else "—"
-            udp = "✓" if r.udp else "—"
-            rel = f"{r.rep_ok}/{r.rep_checks}" if r.rep_checks > 1 else "новый"
-            if p.address == pinned:
-                tags = ("pinned",)
+            if address == self._active:
+                mark, tags = ("★ сейчас" if address == pinned else "● сейчас"), ("active",)
+            elif address == pinned:
+                mark, tags = "★ закреплён", ("pinned",)
             else:
-                # медленные (в VPN не попадут) — приглушённо; чередование строк
-                tags = (("odd",) if row % 2 else ()) + (("slow",) if singbox_config.is_slow(r) else ())
-            row += 1
-            self.table.insert("", "end", iid=p.address, tags=tags,
-                              values=(p.type.value, ("★ " if p.address == pinned else "") + p.address,
-                                      p.country or "—", _network_text(p), latency, speed, udp, rel,
-                                      p.source or "—"))
-        total = sum(counts.values())
-        self.counts_var.set(
-            f"{total} рабочих  ·  SOCKS5 {counts['SOCKS5']}  ·  SOCKS4 {counts['SOCKS4']}  ·  "
-            f"HTTPS {counts['HTTPS']}  ·  с UDP {sum(1 for r in results if r.udp)}"
-        )
+                mark = "в группе" if address in self._group else ""
+                tags = (("odd",) if i % 2 else ()) + (("slow",) if singbox_config.is_slow(r) else ())
+            latency = f"{r.latency_ms:.0f} мс" if r.latency_ms is not None else "—"
+            rel = f"{r.rep_ok}/{r.rep_checks}" if r.rep_checks > 1 else "новый"
+            self.table.item(address, tags=tags, values=(
+                mark, p.type.value, address, p.country or "—", _network_text(p), latency,
+                _speed_text(r.speed_kbps), rel, p.source or "—"))
+
+    def _idle_status(self) -> str:
+        at = self.ctl.last_refresh_at
+        if not at:
+            return ""
+        when = time.localtime(at)
+        day = "сегодня" if when[:3] == time.localtime()[:3] else time.strftime("%d.%m", when)
+        return f"Список обновлён {day} в {time.strftime('%H:%M', when)}"
 
     _LOG_TAGS = (
+        ("warn", ("sing-box ОШИБКА", "sing-box ВНИМАНИЕ")),  # чаще всего — просто отвалился бесплатный прокси
+        ("ok", ("sing-box запущен",)),
         ("error", ("ОШИБКА", "ERROR", "FATAL", "не удалось", "Не удалось")),
         ("warn", ("ВНИМАНИЕ", "WARN", "не отвечает", "отложено", "пропущено")),
-        ("ok", ("Готово", "подключён", "Нашёл", "снова отвечает")),
-        ("dim", ("[sing-box]",)),
+        ("ok", ("Готово", "подключён", "Нашёл", "снова отвечает", "исключён")),
+        ("dim", ("sing-box",)),
     )
 
     def _append_log(self, line: str) -> None:

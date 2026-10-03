@@ -2,8 +2,8 @@
 
 После каждого обновления для каждого источника считается: сколько прокси он
 дал, сколько из них живы (порт открыт), сколько прошли полную проверку,
-сколько быстрых (замеренная скорость от 500 КБ/с), сколько с UDP, сколько в
-сетях обычных провайдеров, а не хостингов (их ТСПУ не душит — см. geo.py), и
+сколько быстрых (замеренная скорость от 500 КБ/с), сколько в сетях обычных
+провайдеров, а не хостингов (их ТСПУ не душит — см. geo.py), и
 сколько рабочих есть ТОЛЬКО у него (уникальный вклад). Если один прокси есть в
 нескольких списках, он засчитывается каждому из них.
 
@@ -32,7 +32,6 @@ class SourceRow:
     alive: int = 0
     working: int = 0
     fast: int = 0
-    udp: int = 0
     isp: int = 0  # рабочих в сети провайдера или мобильной (не хостинг)
     unique_working: int = 0
 
@@ -63,7 +62,6 @@ def compute(members: dict[str, list[str]], results: list[CheckResult]) -> dict[s
             if r.working:
                 row.working += 1
                 row.fast += (r.speed_kbps or 0) >= FAST_KBPS
-                row.udp += r.udp
                 row.isp += r.proxy.network in (geo.NET_ISP, geo.NET_MOBILE)
                 row.unique_working += working_sources.get(a) == {name}
         rows[name] = row
@@ -71,9 +69,9 @@ def compute(members: dict[str, list[str]], results: list[CheckResult]) -> dict[s
 
 
 def format_table(rows: dict[str, SourceRow]) -> list[str]:
-    lines = ["Источник                  дал   живых  рабочих  быстрых  с UDP  у провайдера  уникальных  % рабочих"]
+    lines = ["Источник                  дал   живых  рабочих  быстрых  у провайдера  уникальных  % рабочих"]
     for name, r in sorted(rows.items(), key=lambda kv: (-kv[1].fast, -kv[1].working)):
-        lines.append(f"{name[:24]:24} {r.listed:5} {r.alive:7} {r.working:8} {r.fast:8} {r.udp:6} {r.isp:13}"
+        lines.append(f"{name[:24]:24} {r.listed:5} {r.alive:7} {r.working:8} {r.fast:8} {r.isp:13}"
                      f" {r.unique_working:11} {r.working_pct:9.1f}")
     return lines
 
