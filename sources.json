@@ -141,6 +141,13 @@
       "limit": null,
       "_note": "40 / 1 из 40 и 1 из 36 / 1 и 1",
       "url": "https://raw.githubusercontent.com/awesome-vpn/awesome-vpn/master/all"
+    },
+    {
+      "name": "rcloak.com",
+      "kind": "plain",
+      "type": "socks5",
+      "enabled": true,
+      "url": "https://rcloak.com/api/proxies/raw?protocol=socks5"
     }
   ]
 }
